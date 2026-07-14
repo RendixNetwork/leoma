@@ -14,6 +14,8 @@ Shape (consumed by the leoma-app dashboard):
   history[{hotkey,uid,model_repo,verdict,accepted,mu_hat,lcb,...}]  (newest first)
   live_duels[{eval_id,hotkey,uid,model_repo,model_digest,dispatched_block,eval_server_url}]
     (one entry per duel currently in flight — usually 0 or 1, more with several eval servers)
+  live{...}  (back-compat: the first live_duels entry, or null — the pre-multi-server
+    shape the deployed frontend still reads; drop once it reads live_duels instead)
 """
 from __future__ import annotations
 
@@ -93,6 +95,11 @@ def build_dashboard(
         "queue": list(queue or []),
         "history": list(state.history),
         "live_duels": live_duels,
+        # Back-compat for the already-deployed leoma-app frontend, which reads
+        # ``data.live`` (a single dict-or-null) and has no knowledge of
+        # ``live_duels`` yet. First in-flight duel, or None when idle — exactly
+        # the old single-server shape. Drop once the frontend reads live_duels.
+        "live": live_duels[0] if live_duels else None,
         # Why the validator is not crowning anyone, if it isn't: an unpinned corpus, a
         # missing seed digest, a stale eval box. Without this the operator sees a
         # subnet burning 100% to UID 0 and no reason anywhere.

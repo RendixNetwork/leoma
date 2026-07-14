@@ -299,6 +299,130 @@ class TestCrownDuringMultiSettle:
         assert st.inflight == []                      # both slots resolved either way
 
 
+class TestRateLimiterBypassAcrossServers:
+    async def test_one_hotkey_cannot_occupy_two_servers_with_two_digests(self, monkeypatch, duel_ready):
+        """RL.record_verdict only ever runs at SETTLE time (from _settle_one_slot), so
+        with a single server this was never reachable: only one duel could ever be in
+        flight for anyone. With several servers, a hotkey minting a fresh digest every
+        tick could otherwise occupy every configured server before its first duel ever
+        resolves -- the GPU-fleet monopolization the rate limiter exists to prevent."""
+        fleet = FakeEvalFleet(
+            monkeypatch, ["http://a:9000", "http://b:9000"],
+            {"http://a:9000": lambda e: {"status": "running"},
+             "http://b:9000": lambda e: {"status": "running"}},
+        )
+        st, store = _state(), _store()
+        e1 = _entry("5one", "sha256:" + "1" * 64)
+        e2 = _entry("5one", "sha256:" + "2" * 64)   # same hotkey, different digest
+
+        for _ in range(4):
+            await fleet.tick(st, store, [e1, e2], block=200)
+
+        assert len(st.inflight) == 1               # never both, despite two free servers
+        assert fleet.dispatched == [("5one", "http://a:9000")]
+
+    async def test_a_different_hotkey_still_fills_the_other_server(self, monkeypatch, duel_ready):
+        """The per-hotkey cap must not spill over onto unrelated challengers."""
+        fleet = FakeEvalFleet(
+            monkeypatch, ["http://a:9000", "http://b:9000"],
+            {"http://a:9000": lambda e: {"status": "running"},
+             "http://b:9000": lambda e: {"status": "running"}},
+        )
+        st, store = _state(), _store()
+        e1 = _entry("5one", "sha256:" + "1" * 64)
+        e2 = _entry("5one", "sha256:" + "2" * 64)
+        e3 = _entry("5two", "sha256:" + "3" * 64)
+
+        for _ in range(4):
+            await fleet.tick(st, store, [e1, e2, e3], block=200)
+
+        assert {s["hotkey"] for s in st.inflight} == {"5one", "5two"}
+        assert len(st.inflight) == 2
+
+
+class TestLegacySlotMissingEvalServerUrl:
+    async def test_dispatch_time_busy_urls_tolerates_a_legacy_slot(self, monkeypatch, duel_ready):
+        """A slot migrated from a pre-multi-server bucket (_normalize_inflight) has no
+        eval_server_url key at all -- a legacy duel can still be in flight on the very
+        restart that adds a second EVAL_SERVER_URLS entry. Computing busy_urls must not
+        raise KeyError, and the legacy slot must still count as occupying the single
+        implicit server (EVAL_SERVER_URL) it was actually dispatched to."""
+        fleet = FakeEvalFleet(
+            monkeypatch, ["http://localhost:9000", "http://b:9000"],
+            {"http://localhost:9000": lambda e: {"status": "running"},
+             "http://b:9000": lambda e: {"status": "running"}},
+        )
+        st, store = _state(), _store()
+        st.inflight = [{
+            "eval_id": "eval-legacy", "hotkey": "5legacy", "model_repo": "u/leoma-legacy",
+            "model_digest": "sha256:" + "9" * 64, "dispatched_block": 199,
+            # no "eval_server_url" key -- exactly what a pre-migration slot looks like
+        }]
+        fleet.jobs["eval-legacy"] = {"status": "running"}
+        e1 = _entry("5one", "sha256:" + "1" * 64)
+
+        await fleet.tick(st, store, [e1], block=200)   # must not raise KeyError
+
+        assert fleet.dispatched == [("5one", "http://b:9000")]   # localhost:9000 correctly busy
+        assert len(st.inflight) == 2
+
+
+class TestSettleTimeLocalFaultScoping:
+    async def test_a_local_fault_while_polling_does_not_degrade_when_another_server_is_healthy(
+        self, monkeypatch, duel_ready,
+    ):
+        """A LOCAL fault surfacing while POLLING an already-dispatched duel (not at
+        dispatch-time preflight) must be scoped exactly like the dispatch-time case:
+        with a healthy alternative configured, this is not a subnet-wide condition."""
+        fleet = FakeEvalFleet(
+            monkeypatch, ["http://a:9000", "http://b:9000"],
+            {"http://a:9000": lambda e: {"status": "running"},
+             "http://b:9000": lambda e: {"status": "running"}},
+        )
+        st, store = _state(), _store()
+        e1, e2 = _entry("5one", "sha256:" + "1" * 64), _entry("5two", "sha256:" + "2" * 64)
+
+        await fleet.tick(st, store, [e1, e2], block=200)   # dispatch e1 -> a
+        await fleet.tick(st, store, [e1, e2], block=200)   # dispatch e2 -> b
+        assert len(st.inflight) == 2
+
+        a_slot = next(s for s in st.inflight if s["eval_server_url"] == "http://a:9000")
+        fleet.jobs[a_slot["eval_id"]] = EvalJobFailed(
+            "box pins a different surface", reason="consensus_mismatch",
+        )
+
+        await vmain.settle_inflight(_FakeSubtensor(), object(), st, {}, store, 200)
+
+        assert st.degraded is None                  # b is still healthy -- no false alarm
+        # A LOCAL fault mid-poll keeps its slot rather than discarding it (the duel may
+        # still be fine once the box recovers) -- both slots remain in flight.
+        assert {s["eval_server_url"] for s in st.inflight} == {"http://a:9000", "http://b:9000"}
+
+    async def test_a_local_fault_while_polling_degrades_with_only_one_configured_server(
+        self, monkeypatch, duel_ready,
+    ):
+        """The exact pre-existing single-server behavior, unchanged: with nothing to
+        fail over to, a LOCAL fault discovered mid-poll still degrades the validator."""
+        fleet = FakeEvalFleet(
+            monkeypatch, ["http://only:9000"],
+            {"http://only:9000": lambda e: {"status": "running"}},
+        )
+        st, store = _state(), _store()
+        e1 = _entry("5one", "sha256:" + "1" * 64)
+
+        await fleet.tick(st, store, [e1], block=200)   # dispatch e1
+        assert len(st.inflight) == 1
+
+        slot = st.inflight[0]
+        fleet.jobs[slot["eval_id"]] = EvalJobFailed(
+            "box pins a different surface", reason="consensus_mismatch",
+        )
+
+        await vmain.settle_inflight(_FakeSubtensor(), object(), st, {}, store, 200)
+
+        assert st.degraded == "consensus_mismatch"
+
+
 class TestBusyUrlsExcludeDispatch:
     async def test_busy_urls_are_computed_from_inflight_not_guessed(self, monkeypatch, duel_ready):
         """A slot's OWN url must never be offered again while it's still running —

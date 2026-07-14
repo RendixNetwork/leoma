@@ -124,6 +124,21 @@ class TestLivePanel:
     def test_no_duel_means_an_empty_list_not_null(self):
         assert self._dash(KingState())["live_duels"] == []
 
+    def test_live_back_compat_mirrors_first_live_duel(self):
+        """The deployed leoma-app frontend reads `data.live` (a single dict-or-null)
+        and has no knowledge of `live_duels` yet — it must keep working unmodified."""
+        st = KingState()
+        st.inflight = [{
+            "eval_id": "eval-abc", "hotkey": "5a", "model_repo": "u/leoma-a",
+            "model_digest": "sha256:" + "a" * 64, "dispatched_block": 900,
+            "eval_server_url": "http://box-a:9000",
+        }]
+        d = self._dash(st)
+        assert d["live"] == d["live_duels"][0]
+
+    def test_live_back_compat_is_null_when_idle(self):
+        assert self._dash(KingState())["live"] is None
+
     def test_the_reason_the_subnet_is_burning_is_published(self):
         """Without this an operator sees 100% burning to UID 0 and no reason anywhere."""
         st = KingState()

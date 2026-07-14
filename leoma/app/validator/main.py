@@ -639,6 +639,29 @@ async def _local_fault(state: KingState, failure, *, url: Optional[str] = None) 
     state.degraded = failure.reason
 
 
+async def _note_server_fault(state: KingState, failure, *, url: str) -> None:
+    """A LOCAL fault discovered while POLLING an already-dispatched duel.
+
+    Scoped exactly like the dispatch-time equivalent (see
+    ``_dispatch_to_first_free_server``): with only one configured server, its failure
+    IS total capacity loss, so the whole validator degrades. With several, one bad
+    server does not mean the fleet is down — the other configured servers keep
+    dueling and crowning normally, so unconditionally setting the validator-wide
+    ``state.degraded`` flag here would be a false "everything is down" alarm (or
+    worse, train an operator to start ignoring it). The affected challenger is never
+    marked seen either way, so it is simply retried later — most likely on a
+    different, healthy server.
+    """
+    if len(EVAL_SERVER_URLS) == 1:
+        await _local_fault(state, failure, url=url)
+        return
+    log(
+        f"LOCAL FAULT on {url} ({failure.reason}): {failure.detail} — other configured "
+        "servers are unaffected; this duel will be retried, likely elsewhere",
+        "error",
+    )
+
+
 async def _settle_one_slot(
     subtensor: bt.AsyncSubtensor,
     wallet: bt.Wallet,
@@ -670,7 +693,7 @@ async def _settle_one_slot(
     except Exception as e:  # noqa: BLE001 — classify, never crash the tick
         failure = classify(e)
         if failure.is_local:
-            await _local_fault(state, failure, url=url)
+            await _note_server_fault(state, failure, url=url)
             return False        # keep the slot; the duel may still be fine once we are
         _remove()
         state.touch()
@@ -713,7 +736,7 @@ async def _settle_one_slot(
     if status != "done":
         failure = classify_remote(str(result.get("error") or status), str(result.get("reason") or ""))
         if failure.is_local:
-            await _local_fault(state, failure, url=url)
+            await _note_server_fault(state, failure, url=url)
             await state.flush(store)
             return True
         await _note_failure(state, store, uid_map, entry, key, failure, block)
@@ -724,7 +747,7 @@ async def _settle_one_slot(
     except Exception as e:  # noqa: BLE001
         failure = classify(e)
         if failure.is_local:
-            await _local_fault(state, failure, url=url)
+            await _note_server_fault(state, failure, url=url)
             await state.flush(store)
             return True
         await _note_failure(state, store, uid_map, entry, key, failure, block)
@@ -892,21 +915,32 @@ async def process_challengers(
     if not await settle_inflight(subtensor, wallet, state, uid_map, store, block):
         return  # every configured server is still busy; the tick moves on to weights + dashboard
 
-    # With a single eval server this was structurally impossible: settle_inflight
-    # returning "free" meant the ONE slot had just emptied, so the loop below could
-    # never see the challenger it belonged to still pending. With several servers,
-    # one busy slot no longer blocks the whole loop — so an entry that already has a
-    # duel running on ANOTHER server must be skipped explicitly, or it would be
-    # dispatched a second time, wasting a second server on a duel already in flight.
-    inflight_keys = {_seen_key(s["hotkey"], s["model_digest"]) for s in state.inflight}
+    # At most one in-flight duel per HOTKEY, regardless of digest. This closes TWO
+    # holes at once:
+    #
+    # 1. With a single eval server this was structurally impossible: settle_inflight
+    #    returning "free" meant the ONE slot had just emptied, so the loop below could
+    #    never see the challenger it belonged to still pending. With several servers,
+    #    one busy slot no longer blocks the whole loop, so the same artifact could be
+    #    dispatched a second time if this weren't checked.
+    # 2. RL.check (the cooldown/per-reign-cap rate limiter) only ever sees a hotkey
+    #    once one of its duels has SETTLED — record_verdict is called from
+    #    _settle_one_slot, not at dispatch time — so with a single server this was
+    #    ALSO never a gap: only one duel could be in flight for anyone, ever. With
+    #    several servers, a hotkey minting a fresh digest every tick would sail
+    #    through RL.check every time (it has no settled row yet) and could occupy
+    #    every configured server simultaneously before its first duel ever resolves —
+    #    exactly the GPU-fleet monopolization the rate limiter exists to prevent,
+    #    reachable by an honest miner's automated resubmission, not just an adversary.
+    inflight_hotkeys = {s["hotkey"] for s in state.inflight}
 
     for entry in entries:
         key = _seen_key(entry.hotkey, entry.model_digest)
 
         if key in state.seen_hotkeys or _is_current_king(state, entry):
             continue
-        if key in inflight_keys:
-            continue  # already being duelled on another eval server
+        if entry.hotkey in inflight_hotkeys:
+            continue  # this hotkey already has a duel in flight somewhere, under any digest
         if state.is_quarantined(key):
             continue  # this artifact can never be evaluated
         if block < state.next_retry_block(key):
@@ -988,7 +1022,15 @@ async def process_challengers(
                 await _note_failure(state, store, uid_map, entry, key, failure, block)
                 continue
 
-        busy_urls = {slot["eval_server_url"] for slot in state.inflight}
+        # .get() with a fallback, not direct indexing: a slot migrated from a
+        # pre-multi-server bucket (_normalize_inflight) has no eval_server_url key at
+        # all, and a legacy duel can still be in flight on the very restart that adds
+        # a second EVAL_SERVER_URLS entry. Every other read site already falls back
+        # the same way (see _settle_one_slot) — this one must match, or that upgrade
+        # path raises KeyError every tick until the legacy duel finally resolves,
+        # silently skipping maybe_set_weights and _publish_dashboard for as long as
+        # MAX_INFLIGHT_BLOCKS allows (hours).
+        busy_urls = {slot.get("eval_server_url") or EVAL_SERVER_URL for slot in state.inflight}
         try:
             block_hash = await subtensor.get_block_hash(entry.block)
             log(
