@@ -18,7 +18,9 @@ decision logic is unit-testable with no network, GPU, or chain.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
+
+from leoma.infra.model_store import DIGEST_RE
 
 PASS = "pass"
 WARN = "warn"
@@ -55,13 +57,21 @@ class PreflightReport:
 
 
 def check_seed(seed_digest: str) -> CheckResult:
-    if seed_digest and seed_digest.strip():
-        return CheckResult("seed_digest", PASS, f"genesis king pinned ({seed_digest[:23]}…)")
-    return CheckResult(
-        "seed_digest", FAIL,
-        "chain.toml [seed].seed_digest is empty — with no genesis king the subnet burns "
-        "100% to UID 0. Pin the exact base-model revision before launch.",
-    )
+    digest = (seed_digest or "").strip()
+    if not digest:
+        return CheckResult(
+            "seed_digest", FAIL,
+            "chain.toml [seed].seed_digest is empty — with no genesis king the subnet burns "
+            "100% to UID 0. Pin the exact base-model revision before launch.",
+        )
+    if not DIGEST_RE.match(digest):
+        return CheckResult(
+            "seed_digest", FAIL,
+            f"chain.toml [seed].seed_digest ({digest[:23]}…) is not a recognized digest — "
+            "expected 'sha256:<64hex>' (Hippius) or 'hf:<40hex>' (HuggingFace commit SHA). "
+            "A malformed pin means the genesis king can never resolve.",
+        )
+    return CheckResult("seed_digest", PASS, f"genesis king pinned ({digest[:23]}…)")
 
 
 def check_corpus_pin(corpus_pinned: bool, manifest_digest: str) -> CheckResult:
@@ -103,28 +113,76 @@ def check_eval_server(
     our_consensus_digest: str,
     our_eval_code_digest: str,
     error: Optional[str] = None,
+    *,
+    name: str = "eval_server",
 ) -> CheckResult:
-    """Given the eval box's /health, do its consensus + code digests match ours?"""
+    """Given one eval box's /health, do its consensus + code digests match ours?
+
+    ``name`` lets the caller disambiguate several servers (e.g. ``eval_server[url]``)
+    when checking a whole ``EVAL_SERVER_URLS`` fleet instead of a single box.
+    """
     if error:
-        return CheckResult("eval_server", WARN, f"eval server not reachable ({error}); skipped")
+        return CheckResult(name, WARN, f"eval server not reachable ({error}); skipped")
     if health is None:
-        return CheckResult("eval_server", WARN, "no eval server configured to check against (set EVAL_SERVER_URL)")
+        return CheckResult(name, WARN, "no eval server configured to check against (set EVAL_SERVER_URL(S))")
 
     theirs_consensus = health.get("consensus_digest")
     theirs_code = health.get("eval_code_digest")
     if theirs_consensus != our_consensus_digest:
         return CheckResult(
-            "eval_server", FAIL,
+            name, FAIL,
             f"eval box pins a DIFFERENT consensus surface (box {str(theirs_consensus)[:19]}…, "
             f"validator {our_consensus_digest[:19]}…) — one of you is on a stale chain.toml.",
         )
-    if theirs_code and theirs_code != our_eval_code_digest:
+    if theirs_code is None:
+        # A current box always reports this field (see eval_server.py's /health). A box
+        # missing it entirely is running a build old enough to predate the field — we
+        # have literally no evidence its scoring code matches, so this must not read as
+        # a silent PASS.
         return CheckResult(
-            "eval_server", FAIL,
+            name, WARN,
+            "eval box's /health did not report eval_code_digest (stale build?) — its "
+            "scoring code could not be verified against this validator's.",
+        )
+    if theirs_code != our_eval_code_digest:
+        return CheckResult(
+            name, FAIL,
             f"eval box runs DIFFERENT scoring code (box {str(theirs_code)[:19]}…, "
             f"validator {our_eval_code_digest[:19]}…) — its distances would not be reproducible.",
         )
-    return CheckResult("eval_server", PASS, "eval box matches this validator's consensus surface + code")
+    return CheckResult(name, PASS, "eval box matches this validator's consensus surface + code")
+
+
+class EvalServerProbe(NamedTuple):
+    """One configured server's raw /health result, ready for ``check_eval_servers``."""
+    url: str
+    health: Optional[dict]
+    error: Optional[str] = None
+
+
+def check_eval_servers(
+    probes: tuple[EvalServerProbe, ...],
+    our_consensus_digest: str,
+    our_eval_code_digest: str,
+) -> tuple[CheckResult, ...]:
+    """One :func:`check_eval_server` result per configured ``EVAL_SERVER_URLS`` entry.
+
+    A single-server validator gets exactly one ``eval_server`` check, unchanged. A
+    multi-server validator gets one check per URL — silently checking only the first
+    configured server (or none at all) would leave the rest of the fleet unverified.
+    """
+    if not probes:
+        return (check_eval_server(None, our_consensus_digest, our_eval_code_digest),)
+    if len(probes) == 1:
+        p = probes[0]
+        return (check_eval_server(p.health, our_consensus_digest, our_eval_code_digest, p.error),)
+    return tuple(
+        check_eval_server(
+            p.health, our_consensus_digest, our_eval_code_digest, p.error,
+            name=f"eval_server[{p.url}]",
+        )
+        for p in probes
+    )
 
 
 def check_state_bucket(own_bucket: Optional[str]) -> CheckResult:
@@ -154,16 +212,21 @@ def run_preflight(
     hotkey_name: Optional[str],
     corpus_fetched_digest: Optional[str] = None,
     corpus_error: Optional[str] = None,
-    eval_health: Optional[dict] = None,
-    eval_error: Optional[str] = None,
+    eval_servers: tuple[EvalServerProbe, ...] = (),
 ) -> PreflightReport:
-    """Assemble every readiness check into one verdict. Pure — the caller does the I/O."""
+    """Assemble every readiness check into one verdict. Pure — the caller does the I/O.
+
+    ``eval_servers`` is one probe per configured ``EVAL_SERVER_URLS`` entry (empty when
+    none are configured) — a single-server validator still gets exactly one
+    ``eval_server`` check; a multi-server one gets one per URL, so a stale box can't
+    hide behind a healthy sibling.
+    """
     checks = [
         check_seed(seed_digest),
         check_corpus_pin(corpus_pinned, manifest_digest),
         check_consensus_digest(consensus_digest),
         check_corpus_reachable(corpus_fetched_digest, manifest_digest, corpus_error),
-        check_eval_server(eval_health, consensus_digest, eval_code_digest, eval_error),
+        *check_eval_servers(eval_servers, consensus_digest, eval_code_digest),
         check_state_bucket(own_bucket),
         check_wallet(wallet_name, hotkey_name),
     ]
@@ -172,7 +235,8 @@ def run_preflight(
 
 __all__ = [
     "PASS", "WARN", "FAIL",
-    "CheckResult", "PreflightReport", "run_preflight",
+    "CheckResult", "PreflightReport", "EvalServerProbe", "run_preflight",
     "check_seed", "check_corpus_pin", "check_consensus_digest",
-    "check_corpus_reachable", "check_eval_server", "check_state_bucket", "check_wallet",
+    "check_corpus_reachable", "check_eval_server", "check_eval_servers",
+    "check_state_bucket", "check_wallet",
 ]

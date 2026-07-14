@@ -14,7 +14,9 @@ miner hotkeys you control.
 The subnet deliberately burns 100% to UID 0 until these are pinned. This is not optional.
 
 1. **Pick the base-model revision** and pin `chain.toml [seed].seed_digest` (the genesis
-   king). Choose the exact Wan2.1-I2V-14B-480P revision you will run.
+   king) to the exact Wan2.1-I2V-14B-480P revision you will run — either a Hippius OCI
+   digest (`sha256:<64hex>`) or a HuggingFace commit SHA (`hf:<40hex>`). `preflight`
+   rejects anything else as unresolvable.
 2. **Build and publish the corpus:**
    ```bash
    leoma corpus build-manifest --corpus-id leoma-testnet-v1   # decides windows, hashes truth
@@ -66,13 +68,19 @@ code than the validator. **Gate your launch script on it:**
 leoma preflight && leoma serve
 ```
 
+Running several eval-server processes (one per GPU pair on an 8×H100 box)? Set
+`EVAL_SERVER_URLS` (comma-separated) instead of the single `EVAL_SERVER_URL` —
+`preflight` checks every configured URL independently and labels each finding by its
+box, so one stale server can't hide behind a healthy sibling.
+
 ## 3. Start the services
 
 ```bash
-# GPU box
+# GPU box(es) — one process per pair of GPUs to duel on, each pinned via
+# LEOMA_KING_DEVICE/LEOMA_CHALLENGER_DEVICE if running more than one on the same host
 leoma servers eval-server           # binds 127.0.0.1; validator reaches it over an SSH tunnel
 
-# validator box
+# validator box — set EVAL_SERVER_URLS to the comma-separated list if running more than one
 leoma serve
 ```
 
@@ -119,8 +127,11 @@ sitting well below the dashed freeze cheat floor.
 - **Kill the eval box mid-duel.** The validator should classify it transient and retry;
   the box should come back with a fresh CUDA context.
 - **Point one eval box at a stale `chain.toml`.** `preflight` and the validator's
-  dispatch preflight should both refuse it (`consensus_mismatch`), and the dashboard
-  should show the `degraded` reason.
+  dispatch preflight should both refuse it (`consensus_mismatch`). With a single
+  configured eval server the dashboard should show the `degraded` reason; with several
+  configured (`EVAL_SERVER_URLS`), the stale one should simply be skipped in favor of a
+  healthy sibling — the validator should **not** show `degraded` as long as at least one
+  configured box is healthy.
 
 ---
 

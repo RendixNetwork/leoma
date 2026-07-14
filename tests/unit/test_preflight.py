@@ -10,8 +10,11 @@ from leoma.app.preflight import (
     FAIL,
     PASS,
     WARN,
+    EvalServerProbe,
     check_corpus_reachable,
     check_eval_server,
+    check_eval_servers,
+    check_seed,
     run_preflight,
 )
 
@@ -27,11 +30,18 @@ GOOD = dict(
 )
 
 
+def _good_probe():
+    return EvalServerProbe(
+        "http://eval:9000",
+        {"consensus_digest": GOOD["consensus_digest"], "eval_code_digest": GOOD["eval_code_digest"]},
+        None,
+    )
+
+
 class TestOverallVerdict:
     def test_a_fully_configured_validator_is_ready(self):
         r = run_preflight(**GOOD, corpus_fetched_digest=GOOD["manifest_digest"],
-                          eval_health={"consensus_digest": GOOD["consensus_digest"],
-                                       "eval_code_digest": GOOD["eval_code_digest"]})
+                          eval_servers=(_good_probe(),))
         assert r.ready
         assert r.failures == ()
 
@@ -104,3 +114,76 @@ class TestEvalServer:
     def test_unreachable_eval_server_is_a_warning(self):
         c = check_eval_server(None, "sha256:c", "sha256:e", error="timeout")
         assert c.status == WARN
+
+    def test_missing_eval_code_digest_is_a_warning_not_a_silent_pass(self):
+        """A box whose /health doesn't report eval_code_digest at all (a build old
+        enough to predate the field) gives us zero evidence its scoring code matches
+        — this must surface, not silently PASS."""
+        c = check_eval_server({"consensus_digest": "sha256:c"}, "sha256:c", "sha256:e")
+        assert c.status == WARN
+        assert "could not be verified" in c.detail
+
+    def test_a_custom_name_labels_the_check(self):
+        c = check_eval_server({"consensus_digest": "sha256:c", "eval_code_digest": "sha256:e"},
+                              "sha256:c", "sha256:e", name="eval_server[http://a:9000]")
+        assert c.name == "eval_server[http://a:9000]"
+
+
+class TestSeedDigestFormat:
+    def test_a_valid_hippius_digest_passes(self):
+        assert check_seed("sha256:" + "a" * 64).status == PASS
+
+    def test_a_valid_hf_commit_sha_passes(self):
+        assert check_seed("hf:" + "a" * 40).status == PASS
+
+    def test_blank_fails(self):
+        c = check_seed("")
+        assert c.status == FAIL
+        assert "is empty" in c.detail
+
+    def test_malformed_digest_fails(self):
+        """A truncated/mistyped pin would otherwise resolve to nothing at genesis
+        time — catch it here, not mid-launch."""
+        c = check_seed("sha256:tooshort")
+        assert c.status == FAIL
+        assert "not a recognized digest" in c.detail
+
+    def test_wrong_prefix_fails(self):
+        c = check_seed("md5:" + "a" * 32)
+        assert c.status == FAIL
+
+
+class TestEvalServersFleet:
+    def test_no_probes_gives_one_warning_check(self):
+        checks = check_eval_servers((), "sha256:c", "sha256:e")
+        assert len(checks) == 1
+        assert checks[0].name == "eval_server"
+        assert checks[0].status == WARN
+
+    def test_a_single_probe_keeps_the_unlabeled_name(self):
+        """Single-server operators shouldn't see a URL-qualified name change under them."""
+        probe = EvalServerProbe("http://only:9000", {"consensus_digest": "sha256:c",
+                                                     "eval_code_digest": "sha256:e"}, None)
+        checks = check_eval_servers((probe,), "sha256:c", "sha256:e")
+        assert len(checks) == 1
+        assert checks[0].name == "eval_server"
+        assert checks[0].status == PASS
+
+    def test_several_probes_are_each_checked_and_labeled_by_url(self):
+        """A stale box among several configured servers must not hide behind a
+        healthy sibling — every configured URL gets checked independently."""
+        healthy = EvalServerProbe("http://a:9000", {"consensus_digest": "sha256:c",
+                                                     "eval_code_digest": "sha256:e"}, None)
+        stale = EvalServerProbe("http://b:9000", {"consensus_digest": "sha256:OLD",
+                                                   "eval_code_digest": "sha256:e"}, None)
+        checks = check_eval_servers((healthy, stale), "sha256:c", "sha256:e")
+        assert len(checks) == 2
+        by_name = {c.name: c for c in checks}
+        assert by_name["eval_server[http://a:9000]"].status == PASS
+        assert by_name["eval_server[http://b:9000]"].status == FAIL
+
+    def test_every_server_stale_fails_the_whole_fleet_check(self):
+        stale_a = EvalServerProbe("http://a:9000", {"consensus_digest": "sha256:OLD"}, None)
+        stale_b = EvalServerProbe("http://b:9000", None, "connection refused")
+        checks = check_eval_servers((stale_a, stale_b), "sha256:c", "sha256:e")
+        assert all(c.status != PASS for c in checks)

@@ -101,16 +101,28 @@ def preflight():
         except Exception as e:  # noqa: BLE001 — a fetch failure is a WARN, not a crash
             corpus_error = str(e)
 
-    eval_health = None
-    eval_error = None
-    eval_url = os.environ.get("EVAL_SERVER_URL", "")
-    if eval_url:
-        try:
-            import httpx
+    # EVAL_SERVER_URLS (plural) lets an operator configure several independently-run
+    # eval-server processes; checking only EVAL_SERVER_URL here would silently skip
+    # every server but the first. _parse_eval_server_urls is the same pure parser the
+    # validator itself uses, so the two never drift apart.
+    eval_url_env = os.environ.get("EVAL_SERVER_URL", "")
+    eval_urls_env = os.environ.get("EVAL_SERVER_URLS", "")
+    eval_probes = ()
+    if eval_url_env or eval_urls_env.strip():
+        import httpx
 
-            eval_health = httpx.get(f"{eval_url}/health", timeout=httpx.Timeout(15.0)).json()
-        except Exception as e:  # noqa: BLE001
-            eval_error = str(e)
+        from leoma.app.preflight import EvalServerProbe
+        from leoma.app.validator.main import _parse_eval_server_urls
+
+        urls = _parse_eval_server_urls(eval_urls_env, eval_url_env or "http://localhost:9000")
+        probes = []
+        for url in urls:
+            try:
+                health = httpx.get(f"{url}/health", timeout=httpx.Timeout(15.0)).json()
+                probes.append(EvalServerProbe(url, health, None))
+            except Exception as e:  # noqa: BLE001
+                probes.append(EvalServerProbe(url, None, str(e)))
+        eval_probes = tuple(probes)
 
     report = run_preflight(
         seed_digest=SEED_DIGEST,
@@ -123,8 +135,7 @@ def preflight():
         hotkey_name=os.environ.get("HOTKEY_NAME"),
         corpus_fetched_digest=corpus_fetched_digest,
         corpus_error=corpus_error,
-        eval_health=eval_health,
-        eval_error=eval_error,
+        eval_servers=eval_probes,
     )
 
     icon = {PASS: "✓", WARN: "▲", FAIL: "✗"}
@@ -167,10 +178,22 @@ def smoke(source, require_live):
     if src.startswith("http://") or src.startswith("https://"):
         import httpx
 
-        dash = httpx.get(src, timeout=httpx.Timeout(20.0)).json()
+        try:
+            resp = httpx.get(src, timeout=httpx.Timeout(20.0))
+            resp.raise_for_status()
+            dash = resp.json()
+        except httpx.HTTPError as e:
+            raise click.ClickException(f"could not fetch dashboard from {src}: {e}")
+        except ValueError as e:  # json.JSONDecodeError subclasses ValueError
+            raise click.ClickException(f"{src} did not return valid JSON: {e}")
     else:
-        with open(src) as f:
-            dash = json.load(f)
+        try:
+            with open(src) as f:
+                dash = json.load(f)
+        except OSError as e:
+            raise click.ClickException(f"could not read dashboard file {src}: {e}")
+        except json.JSONDecodeError as e:
+            raise click.ClickException(f"{src} is not valid JSON: {e}")
 
     report = run_smoke(dash, require_live=require_live)
     for s in report.scenarios:

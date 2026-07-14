@@ -80,10 +80,22 @@ def saw_copy_rejected(dash: dict) -> Scenario:
 
 
 def saw_live_duel(dash: dict) -> Scenario:
-    """The dashboard surfaced a duel running on the GPU (the site moves mid-duel)."""
-    live = dash.get("live")
-    ev = f"{live.get('model_repo')} dispatched at block {live.get('dispatched_block')}" if live else "no live duel at snapshot time"
-    return Scenario("live_duel", "the dashboard shows a live in-flight duel", bool(live), ev)
+    """The dashboard surfaced at least one duel running on the GPU (the site moves
+    mid-duel). Reads `live_duels` (a list — a multi-eval-server validator can have
+    several duels in flight at once) and falls back to the older single-duel `live`
+    key for a dashboard snapshot published before live_duels existed."""
+    live_duels = dash.get("live_duels")
+    if live_duels is None:
+        single = dash.get("live")
+        live_duels = [single] if single else []
+    if not live_duels:
+        return Scenario("live_duel", "the dashboard shows a live in-flight duel", False,
+                        "no live duel at snapshot time")
+    first = live_duels[0]
+    ev = f"{first.get('model_repo')} dispatched at block {first.get('dispatched_block')}"
+    if len(live_duels) > 1:
+        ev += f" (+{len(live_duels) - 1} more in flight)"
+    return Scenario("live_duel", "the dashboard shows a live in-flight duel", True, ev)
 
 
 def saw_healthy(dash: dict) -> Scenario:

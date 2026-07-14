@@ -60,6 +60,34 @@ class TestIndividualScenarios:
         assert saw_live_duel(_dash(live={"model_repo": "u/x", "dispatched_block": 9})).observed
         assert not saw_live_duel(_dash()).observed
 
+    def test_live_duel_prefers_the_live_duels_list(self):
+        """A multi-eval-server validator publishes live_duels (a list) instead of the
+        older single live dict — the smoke tool must read the current key, not just
+        the back-compat one."""
+        dash = {"history": [], "live_duels": [{"model_repo": "u/multi", "dispatched_block": 42}],
+                "degraded": None}
+        s = saw_live_duel(dash)
+        assert s.observed
+        assert "u/multi" in s.evidence
+
+    def test_live_duel_reports_how_many_more_are_in_flight(self):
+        dash = {"history": [], "live_duels": [
+            {"model_repo": "u/a", "dispatched_block": 1},
+            {"model_repo": "u/b", "dispatched_block": 2},
+        ], "degraded": None}
+        s = saw_live_duel(dash)
+        assert s.observed
+        assert "+1 more" in s.evidence
+
+    def test_live_duel_falls_back_to_live_when_live_duels_key_is_absent(self):
+        """A dashboard snapshot published before live_duels existed still works."""
+        dash = {"history": [], "live": {"model_repo": "u/old", "dispatched_block": 5}, "degraded": None}
+        assert saw_live_duel(dash).observed
+
+    def test_live_duel_is_not_observed_when_live_duels_is_an_empty_list(self):
+        dash = {"history": [], "live_duels": [], "degraded": None}
+        assert not saw_live_duel(dash).observed
+
     def test_healthy_is_the_absence_of_a_degraded_reason(self):
         assert saw_healthy(_dash()).observed
         assert not saw_healthy(_dash(degraded="corpus_unpinned")).observed
