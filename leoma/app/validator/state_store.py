@@ -163,6 +163,24 @@ class JsonBucketStore:
         await asyncio.to_thread(self.put_sync, key, obj)
 
 
+def _normalize_inflight(raw: Any) -> list:
+    """Migrate the persisted ``inflight`` shape: a single dict-or-None (every bucket
+    written before multi-eval-server dispatch) into the list every bucket uses now.
+
+    A live validator's existing bucket has ``inflight`` as ``null`` (no duel running)
+    or a bare dict (exactly one). Wrapping the dict in a 1-item list is exactly
+    "one slot, the same slot it always had" — nothing about an in-flight duel is
+    lost or reinterpreted, just represented honestly for N>1 servers.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        return [raw] if raw else []
+    if isinstance(raw, list):
+        return raw
+    return []  # pragma: no cover - defensive; not a shape this field has ever had
+
+
 @dataclass
 class KingState:
     """In-memory view of the persisted king state."""
@@ -187,7 +205,10 @@ class KingState:
     # by artifact: the seen-set already stops the same artifact being dueled twice, but
     # a hotkey can mint unlimited fresh digests and each one buys a free multi-hour duel.
     duels: dict = field(default_factory=dict)
-    inflight: Optional[dict] = None          # the single dispatched duel, if any
+    # Dispatched duels currently in flight, one per busy eval-server URL (0..N — see
+    # EVAL_SERVER_URLS). Was a single dict-or-None when there was only ever one eval
+    # server; a list is the honest shape once a validator can dispatch to several.
+    inflight: list = field(default_factory=list)
     weight_failures: int = 0                 # consecutive genuine set_weights failures
     next_weight_block: int = 0               # block-based backoff after a failure
 
@@ -229,7 +250,7 @@ class KingState:
         # Default-on-missing: live validators have existing buckets whose state.json
         # predates this field, and they must load rather than crash.
         self.duels = doc.get("duels") or {}
-        self.inflight = doc.get("inflight")
+        self.inflight = _normalize_inflight(doc.get("inflight"))
         self.weight_failures = doc.get("weight_failures", 0)
         self.next_weight_block = doc.get("next_weight_block", 0)
         return self

@@ -46,7 +46,7 @@ class TestGuillotine:
         # Poll 500 blocks later — well inside the 1000-block bound.
         await vmain.settle_inflight(_Sub(), None, st, {}, store, block=700)
 
-        assert st.inflight is not None, "a duel within the bound was abandoned"
+        assert st.inflight != [], "a duel within the bound was abandoned"
         assert box.cancelled == []
 
     async def test_a_duel_past_the_bound_is_abandoned_and_the_slot_freed(self, monkeypatch, duel_ready):
@@ -56,13 +56,13 @@ class TestGuillotine:
         e = _entry()
 
         await box.drive(st, store, [e], block=200, ticks=1)   # dispatched at 200
-        eval_id = st.inflight["eval_id"]
+        eval_id = st.inflight[0]["eval_id"]
 
         # Poll 1500 blocks later — past the 1000-block bound.
         free = await vmain.settle_inflight(_Sub(), None, st, {}, store, block=1700)
 
         assert free is True                       # the slot is free for the next dispatch
-        assert st.inflight is None
+        assert st.inflight == []
         assert eval_id in box.cancelled           # we asked the box to stop burning GPU
         key = vmain._seen_key(e.hotkey, e.model_digest)
         assert st.attempts[key]["last_reason"] == "inflight_timeout"
@@ -94,11 +94,11 @@ class TestGuillotine:
 
         # Tick 1 at block 200: dispatch 5stuck.
         await vmain.process_challengers(_Sub(), None, st, {}, store, [stuck, nxt], 200)
-        assert st.inflight["hotkey"] == "5stuck"
+        assert st.inflight[0]["hotkey"] == "5stuck"
 
         # Tick 2 far later: 5stuck is guillotined, then 5next dispatched in the same tick.
         await vmain.process_challengers(_Sub(), None, st, {}, store, [stuck, nxt], 2000)
-        assert st.inflight is not None and st.inflight["hotkey"] == "5next"
+        assert len(st.inflight) == 1 and st.inflight[0]["hotkey"] == "5next"
 
     async def test_a_slot_with_no_dispatched_block_does_not_crash(self, monkeypatch, duel_ready):
         """A slot persisted by an older build has no dispatched_block; treat it as
@@ -106,16 +106,16 @@ class TestGuillotine:
         monkeypatch.setattr(vmain, "MAX_INFLIGHT_BLOCKS", 100)
         box = FakeEvalBox(monkeypatch, lambda e: {"status": "running"}, duel_ready)
         st, store = _state(), _store()
-        st.inflight = {
+        st.inflight = [{
             "eval_id": "eval-old", "hotkey": "5a", "model_repo": "u/leoma-a",
             "model_digest": "sha256:" + "a" * 64, "block": 100, "king_digest": KING_DIGEST,
-            # no dispatched_block
-        }
+            # no dispatched_block, no eval_server_url — an older build's persisted slot
+        }]
         box.jobs["eval-old"] = {"status": "running"}
 
         free = await vmain.settle_inflight(_Sub(), None, st, {}, store, block=999999)
         assert free is False              # age defaults to 0 -> not stuck
-        assert st.inflight is not None
+        assert st.inflight != []
 
 
 class _Sub:

@@ -135,7 +135,7 @@ class TestLoad:
         assert loaded.stats["accepted"] == 1
         # new v2 fields default safely on an old bucket
         assert loaded.attempts == {}
-        assert loaded.inflight is None
+        assert loaded.inflight == []
 
 
 class TestFlush:

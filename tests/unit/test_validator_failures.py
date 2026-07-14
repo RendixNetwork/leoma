@@ -181,7 +181,7 @@ class TestProcessChallengers:
 
         assert st.attempts == {}          # no attempt consumed
         assert st.seen_hotkeys == set()   # nobody marked seen
-        assert st.inflight is None
+        assert st.inflight == []
 
     async def test_permanent_failure_quarantines_and_records_an_error_row(self, monkeypatch, duel_ready):
         box = FakeEvalBox(
@@ -290,9 +290,9 @@ class TestTheTickIsBounded:
 
         await box.drive(st, store, [e], block=200, ticks=1)
 
-        assert st.inflight is not None
-        assert st.inflight["hotkey"] == "5a"
-        assert st.inflight["king_digest"] == KING_DIGEST
+        assert len(st.inflight) == 1
+        assert st.inflight[0]["hotkey"] == "5a"
+        assert st.inflight[0]["king_digest"] == KING_DIGEST
         assert st.seen_hotkeys == set()      # not settled yet — no verdict, no crown
 
     async def test_a_running_duel_is_not_dispatched_twice(self, monkeypatch, duel_ready):
@@ -317,17 +317,17 @@ class TestTheTickIsBounded:
         e = _entry("a")
 
         await box.drive(st, store, [e], block=200, ticks=1)
-        slot = dict(st.inflight)
+        slot = dict(st.inflight[0])
         await st.flush(store)
 
         # ... the validator restarts here. The slot comes back from the bucket.
         revived = await KingState.load(store)
-        assert revived.inflight == slot
+        assert revived.inflight == [slot]
 
         box.jobs[slot["eval_id"]] = {"status": "done", "verdict": make_verdict(duel_ready, accepted=True)}
         await box.drive(revived, store, [e], block=300, ticks=1)
 
-        assert revived.inflight is None
+        assert revived.inflight == []
         assert revived.king["hotkey"] == "5a"      # the duel we left running still counted
 
     async def test_a_lost_job_is_transient_and_never_blamed_on_the_miner(self, monkeypatch, duel_ready):
@@ -337,13 +337,13 @@ class TestTheTickIsBounded:
         e = _entry("a")
         await box.drive(st, store, [e], block=200, ticks=1)
 
-        eval_id = st.inflight["eval_id"]
+        eval_id = st.inflight[0]["eval_id"]
         box.jobs[eval_id] = EvalJobFailed("gone", reason="eval_job_lost")
 
         await box.drive(st, store, [e], block=201, ticks=1)
 
         key = vmain._seen_key(e.hotkey, e.model_digest)
-        assert st.inflight is None
+        assert st.inflight == []
         assert not st.is_quarantined(key)                 # retried, not punished
         assert st.attempts[key]["last_class"] == "transient"
 
@@ -360,7 +360,7 @@ class TestTheTickIsBounded:
         st.king = {"hotkey": "5NEW", "model_repo": "u/leoma-new",
                    "model_digest": "sha256:" + "n" * 64, "reign_number": 2}
 
-        box.jobs[st.inflight["eval_id"]] = {
+        box.jobs[st.inflight[0]["eval_id"]] = {
             "status": "done", "verdict": make_verdict(duel_ready, accepted=True)
         }
         await box.drive(st, store, [e], block=201, ticks=1)

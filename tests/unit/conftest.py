@@ -156,6 +156,14 @@ class FakeEvalBox:
     The validator no longer blocks on a duel — it dispatches, persists a slot, and
     collects the verdict on a later tick. So a test has to drive *ticks*, not calls.
     :meth:`drive` does that.
+
+    Simulates exactly ONE eval server (the default single-``EVAL_SERVER_URL`` setup
+    every existing test exercises). ``eval_server_url`` is accepted on every method
+    purely so this stays a drop-in replacement for the real, now url-aware,
+    ``start_duel``/``poll_duel``/``cancel_duel`` — single-server tests never need to
+    look at it. Multi-server dispatch has its own fixture in
+    ``test_multi_eval_server.py``, since faking N independent servers with distinct
+    busy/faulty states needs per-url state this class doesn't track.
     """
 
     def __init__(self, monkeypatch, outcome, spec):
@@ -171,7 +179,7 @@ class FakeEvalBox:
         monkeypatch.setattr(vmain, "poll_duel", self.poll_duel)
         monkeypatch.setattr(vmain, "cancel_duel", self.cancel_duel)
 
-    async def start_duel(self, entry, king, block_hash):
+    async def start_duel(self, entry, king, block_hash, *, eval_server_url=""):
         outcome = self._outcome(entry)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -180,14 +188,14 @@ class FakeEvalBox:
         self.dispatched.append(entry.hotkey)
         return eval_id
 
-    async def poll_duel(self, eval_id):
+    async def poll_duel(self, eval_id, *, eval_server_url=""):
         self.polled.append(eval_id)
         outcome = self.jobs[eval_id]
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
-    async def cancel_duel(self, eval_id):
+    async def cancel_duel(self, eval_id, *, eval_server_url=""):
         self.cancelled.append(eval_id)
 
     async def drive(self, state, store, entries, *, block, ticks=None):

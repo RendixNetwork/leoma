@@ -63,6 +63,32 @@ from leoma.app.validator.state_store import MAX_DUEL_ATTEMPTS
 from leoma.app.validator import king as K
 
 EVAL_SERVER_URL = os.environ.get("EVAL_SERVER_URL", "http://localhost:9000")
+
+# One eval server means one duel at a time — the next bottleneck once the prescreen
+# is doing its job (a bad model is rejected in seconds, but a QUEUE of good ones still
+# drains one multi-hour duel at a time). EVAL_SERVER_URLS lets an operator point at
+# several independently-run eval-server processes (e.g. one per GPU pair on an 8xH100
+# box, each pinned via LEOMA_KING_DEVICE/LEOMA_CHALLENGER_DEVICE) and the validator
+# fills whichever is free. Falls back to the single EVAL_SERVER_URL when unset, so a
+# single-box operator's config — and every existing single-server behavior — is
+# unchanged.
+def _parse_eval_server_urls(raw: str, fallback: str) -> list[str]:
+    """Pure so it's directly testable — no env-var/reload dance required.
+
+    A blank/whitespace-only entry between commas is dropped rather than kept as an
+    empty string, which would otherwise become a URL nothing can ever dispatch to
+    (permanently "busy" from the moment it's counted, since it can never resolve).
+    """
+    raw = raw.strip()
+    if not raw:
+        return [fallback]
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+
+EVAL_SERVER_URLS: list[str] = _parse_eval_server_urls(
+    os.environ.get("EVAL_SERVER_URLS", ""), EVAL_SERVER_URL
+)
+
 CHALLENGE_POLL_INTERVAL = int(os.environ.get("LEOMA_CHALLENGE_POLL_INTERVAL", "60"))
 
 # The pre-dispatch architecture check. On by default: it is the difference between a
@@ -134,7 +160,7 @@ async def refresh_uid_map(subtensor: bt.AsyncSubtensor) -> dict[str, int]:
     return {hk: uid for uid, hk in enumerate(hotkeys)}
 
 
-async def preflight_eval_server(client) -> None:
+async def preflight_eval_server(client, eval_server_url: str = EVAL_SERVER_URL) -> None:
     """Refuse a box whose pinned exam or scoring code has drifted from ours.
 
     A stale eval box is the most *likely* consensus failure in the whole system —
@@ -142,28 +168,30 @@ async def preflight_eval_server(client) -> None:
     produces confident, plausible verdicts that no other validator can reproduce.
     One cheap GET catches it; the alternative is finding out after an hour of GPU.
     """
-    resp = await client.get(f"{EVAL_SERVER_URL}/health")
+    resp = await client.get(f"{eval_server_url}/health")
     resp.raise_for_status()
     health = resp.json()
 
     theirs = health.get("consensus_digest")
     if theirs != CONSENSUS_DIGEST:
         raise EvalJobFailed(
-            f"eval server pins a different consensus surface (box {theirs}, "
-            f"validator {CONSENSUS_DIGEST}). One of us is running a stale chain.toml.",
+            f"eval server {eval_server_url} pins a different consensus surface (box "
+            f"{theirs}, validator {CONSENSUS_DIGEST}). One of us is running a stale chain.toml.",
             reason="consensus_mismatch",
         )
     their_code = health.get("eval_code_digest")
     if their_code and their_code != eval_code_digest():
         raise EvalJobFailed(
-            f"eval server runs different scoring code (box {their_code}, validator "
-            f"{eval_code_digest()}). Its distances would not be reproducible.",
+            f"eval server {eval_server_url} runs different scoring code (box {their_code}, "
+            f"validator {eval_code_digest()}). Its distances would not be reproducible.",
             reason="code_mismatch",
         )
 
 
-async def start_duel(entry: ChallengerEntry, king: dict, block_hash: str) -> str:
-    """POST a duel and return its ``eval_id``. Returns in **seconds**, not hours.
+async def start_duel(
+    entry: ChallengerEntry, king: dict, block_hash: str, *, eval_server_url: str = EVAL_SERVER_URL,
+) -> str:
+    """POST a duel to ``eval_server_url`` and return its ``eval_id``. Seconds, not hours.
 
     The validator used to dispatch a duel and then *stream it to completion* — an
     ``await`` that blocked the entire tick loop for as long as the duel took. For a
@@ -192,29 +220,29 @@ async def start_duel(entry: ChallengerEntry, king: dict, block_hash: str) -> str
     }
     timeout = httpx.Timeout(_EVAL_POLL_TIMEOUT, connect=_EVAL_CONNECT_TIMEOUT)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        await preflight_eval_server(client)
+        await preflight_eval_server(client, eval_server_url)
 
-        resp = await client.post(f"{EVAL_SERVER_URL}/eval", json=payload)
+        resp = await client.post(f"{eval_server_url}/eval", json=payload)
         if resp.status_code == 409:
-            raise EvalBusy("eval server is already running a duel")
+            raise EvalBusy(f"eval server {eval_server_url} is already running a duel")
         resp.raise_for_status()
         return resp.json()["eval_id"]
 
 
-async def cancel_duel(eval_id: str) -> None:
+async def cancel_duel(eval_id: str, *, eval_server_url: str = EVAL_SERVER_URL) -> None:
     """Best-effort ``DELETE /eval/{id}`` — ask the box to stop burning GPU. Never raises."""
     import httpx
 
     timeout = httpx.Timeout(_EVAL_POLL_TIMEOUT, connect=_EVAL_CONNECT_TIMEOUT)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            await client.delete(f"{EVAL_SERVER_URL}/eval/{eval_id}")
+            await client.delete(f"{eval_server_url}/eval/{eval_id}")
     except Exception:  # noqa: BLE001 — the abandon must proceed whether or not this lands
         pass
 
 
-async def poll_duel(eval_id: str) -> dict:
-    """Ask the eval server how a dispatched duel is going.
+async def poll_duel(eval_id: str, *, eval_server_url: str = EVAL_SERVER_URL) -> dict:
+    """Ask ``eval_server_url`` how a dispatched duel is going.
 
     Returns ``{status, phase, verdict, error, reason}``. ``status`` is one of
     ``running`` / ``done`` / ``error`` / ``cancelled``.
@@ -227,15 +255,48 @@ async def poll_duel(eval_id: str) -> dict:
 
     timeout = httpx.Timeout(_EVAL_POLL_TIMEOUT, connect=_EVAL_CONNECT_TIMEOUT)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(f"{EVAL_SERVER_URL}/eval/{eval_id}")
+        resp = await client.get(f"{eval_server_url}/eval/{eval_id}")
         if resp.status_code == 404:
             raise EvalJobFailed(
-                f"eval server no longer knows about {eval_id} (it restarted, or the job "
-                "aged out). The duel is lost; it will be re-dispatched.",
+                f"eval server {eval_server_url} no longer knows about {eval_id} (it restarted, "
+                "or the job aged out). The duel is lost; it will be re-dispatched.",
                 reason="eval_job_lost",
             )
         resp.raise_for_status()
         return resp.json()
+
+
+async def _dispatch_to_first_free_server(
+    entry: ChallengerEntry, king: dict, block_hash: str, busy_urls: set[str],
+) -> tuple[str, str]:
+    """Try every configured eval-server URL not already busy, in order, and return
+    ``(url, eval_id)`` from the first that accepts the duel.
+
+    A LOCAL fault (a stale consensus surface, mismatched scoring code) on one URL is
+    skipped in favor of trying another — **unless there is only one configured URL**,
+    in which case it propagates immediately, exactly as it always has for a
+    single-box validator. Only when every free URL is locally faulty does the fault
+    propagate, because at that point there genuinely is no eval capacity anywhere.
+    """
+    free = [u for u in EVAL_SERVER_URLS if u not in busy_urls]
+    last_local: Optional[Exception] = None
+    for url in free:
+        try:
+            eval_id = await start_duel(entry, king, block_hash, eval_server_url=url)
+            return url, eval_id
+        except EvalBusy:
+            continue  # this url raced us onto another duel; try the next free one
+        except Exception as e:  # noqa: BLE001 — classified below, and by the caller
+            failure = classify(e)
+            if failure.is_local and len(EVAL_SERVER_URLS) > 1:
+                log(f"Eval server {url} is locally faulty ({failure.reason}); trying another "
+                    "configured server", "warn")
+                last_local = e
+                continue
+            raise  # a single configured URL, or a non-local error: behave exactly as before
+    if last_local is not None:
+        raise last_local  # every free URL was locally faulty — genuinely no capacity
+    raise EvalBusy("no free eval server accepted the duel")
 
 
 def _verified_verdict(verdict: Optional[dict]) -> dict:
@@ -556,7 +617,7 @@ def _slot_entry(slot: dict) -> ChallengerEntry:
     )
 
 
-async def _local_fault(state: KingState, failure) -> None:
+async def _local_fault(state: KingState, failure, *, url: Optional[str] = None) -> None:
     """OUR fault: stop dueling, say so loudly, and burn until an operator fixes it.
 
     A corpus that doesn't match the pinned manifest, an eval box on a stale
@@ -564,41 +625,54 @@ async def _local_fault(state: KingState, failure) -> None:
     reigning king — so it is not evidence about any one of them. And charging it to
     the ledger would, after four attempts, quarantine every honest miner on the
     subnet for our own misconfiguration.
+
+    Reached in two situations: a fault discovered while POLLING an already-dispatched
+    duel (rare — there is no per-poll consensus check to trip), or every configured
+    eval server having failed its DISPATCH-time preflight (``_dispatch_to_first_free_server``
+    already tried the others). Either way there is, at this point, no working eval
+    capacity at all, so degrading the whole validator is correct regardless of how
+    many servers are configured — the per-server "try another one" nuance lives
+    entirely in ``_dispatch_to_first_free_server``, upstream of here.
     """
-    log(f"LOCAL FAULT ({failure.reason}) — this validator cannot duel: {failure.detail}", "error")
+    where = f" ({url})" if url else ""
+    log(f"LOCAL FAULT{where} ({failure.reason}) — this validator cannot duel: {failure.detail}", "error")
     state.degraded = failure.reason
 
 
-async def settle_inflight(
+async def _settle_one_slot(
     subtensor: bt.AsyncSubtensor,
     wallet: bt.Wallet,
     state: KingState,
     uid_map: dict[str, int],
     store: JsonBucketStore,
     block: int,
+    slot: dict,
 ) -> bool:
-    """Collect a dispatched duel's verdict. Returns True once the slot is free.
+    """Try to resolve ONE in-flight slot. Returns True iff it is now resolved
+    (settled, abandoned, or discarded) and has been removed from ``state.inflight``;
+    False if it is still running and was left in place.
 
-    **Restart-safe.** The slot is persisted, so a validator that restarts mid-duel
-    re-attaches to the job it left running instead of orphaning it. Before this, a
-    restart meant the eval box spent hours on a duel nobody would ever read, and
-    answered 409 to everyone else the entire time.
+    Removal happens at the exact point the original single-slot code used to set
+    ``state.inflight = None`` — i.e. *before* calling anything that flushes (
+    ``_note_failure``, the crown/reject paths). A crash must never leave a resolved
+    duel's outcome persisted while its slot still looks in-flight: on restart that
+    would re-settle — and re-record, re-crown, re-charge — the same verdict twice.
     """
-    slot = state.inflight
-    if not slot:
-        return True
-
     entry = _slot_entry(slot)
     key = _seen_key(entry.hotkey, entry.model_digest)
+    url = slot.get("eval_server_url") or EVAL_SERVER_URL
+
+    def _remove() -> None:
+        state.inflight = [s for s in state.inflight if s is not slot]
 
     try:
-        result = await poll_duel(slot["eval_id"])
+        result = await poll_duel(slot["eval_id"], eval_server_url=url)
     except Exception as e:  # noqa: BLE001 — classify, never crash the tick
         failure = classify(e)
         if failure.is_local:
-            await _local_fault(state, failure)
+            await _local_fault(state, failure, url=url)
             return False        # keep the slot; the duel may still be fine once we are
-        state.inflight = None
+        _remove()
         state.touch()
         await _note_failure(state, store, uid_map, entry, key, failure, block)
         return True
@@ -609,16 +683,17 @@ async def settle_inflight(
         # first. This is the validator-side backstop for the case that watchdog can't
         # catch: a box that keeps reporting "running" without ever tripping a phase
         # budget (a disabled watchdog, a lying box, a partition where poll succeeds but
-        # the box is wedged). Without it, one stuck duel holds the single in-flight slot
-        # forever and no other challenger is ever dispatched. The bound is deliberately
+        # the box is wedged). Without it, one stuck duel holds its slot forever and
+        # that server never picks up another challenger. The bound is deliberately
         # generous — a real 32-clip duel of two 14B models can legitimately run hours —
         # so this only ever fires on a genuinely hung box.
         age = block - int(slot.get("dispatched_block", block))
         if age > MAX_INFLIGHT_BLOCKS:
-            log(f"Duel {slot['eval_id']} has been in flight {age} blocks (> {MAX_INFLIGHT_BLOCKS}) "
-                "— abandoning as a stuck box and re-dispatching next tick", "warn")
-            await cancel_duel(slot["eval_id"])
-            state.inflight = None
+            log(f"Duel {slot['eval_id']} on {url} has been in flight {age} blocks "
+                f"(> {MAX_INFLIGHT_BLOCKS}) — abandoning as a stuck box and re-dispatching "
+                "next tick", "warn")
+            await cancel_duel(slot["eval_id"], eval_server_url=url)
+            _remove()
             state.touch()
             # TRANSIENT, never LOCAL or a strike: a hung box is not the challenger's
             # fault. Backoff + the 4-attempt budget means a genuinely pathological model
@@ -627,17 +702,18 @@ async def settle_inflight(
                                   f"duel exceeded {MAX_INFLIGHT_BLOCKS} blocks in flight")
             await _note_failure(state, store, uid_map, entry, key, failure, block)
             return True
-        log(f"Duel {slot['eval_id']} still running (phase={result.get('phase')}, age={age} blocks)", "info")
+        log(f"Duel {slot['eval_id']} on {url} still running (phase={result.get('phase')}, "
+            f"age={age} blocks)", "info")
         return False
 
     # Terminal, one way or another: the slot is free from here on.
-    state.inflight = None
+    _remove()
     state.touch()
 
     if status != "done":
         failure = classify_remote(str(result.get("error") or status), str(result.get("reason") or ""))
         if failure.is_local:
-            await _local_fault(state, failure)
+            await _local_fault(state, failure, url=url)
             await state.flush(store)
             return True
         await _note_failure(state, store, uid_map, entry, key, failure, block)
@@ -648,7 +724,7 @@ async def settle_inflight(
     except Exception as e:  # noqa: BLE001
         failure = classify(e)
         if failure.is_local:
-            await _local_fault(state, failure)
+            await _local_fault(state, failure, url=url)
             await state.flush(store)
             return True
         await _note_failure(state, store, uid_map, entry, key, failure, block)
@@ -704,6 +780,32 @@ async def settle_inflight(
     return True
 
 
+async def settle_inflight(
+    subtensor: bt.AsyncSubtensor,
+    wallet: bt.Wallet,
+    state: KingState,
+    uid_map: dict[str, int],
+    store: JsonBucketStore,
+    block: int,
+) -> bool:
+    """Collect verdicts for every dispatched duel. Returns True iff at least one
+    eval-server slot is free once settling is done.
+
+    **Restart-safe.** Each slot is persisted, so a validator that restarts mid-duel
+    re-attaches to the jobs it left running instead of orphaning them. Before this, a
+    restart meant the eval box spent hours on a duel nobody would ever read, and
+    answered 409 to everyone else the entire time.
+
+    Settled **sequentially against live state**, not a snapshot: crowning a challenger
+    from one slot changes ``state.king``, and the next slot's "did the king change
+    under me" check must see that change, or a challenger dueled against a
+    since-deposed king could be crowned a second time in the same tick.
+    """
+    for slot in list(state.inflight):
+        await _settle_one_slot(subtensor, wallet, state, uid_map, store, block, slot)
+    return len(state.inflight) < len(EVAL_SERVER_URLS)
+
+
 async def _crown_earlier(
     subtensor: bt.AsyncSubtensor,
     wallet: bt.Wallet,
@@ -757,21 +859,24 @@ async def process_challengers(
     entries: list[ChallengerEntry],
     block: int,
 ) -> None:
-    """Settle the in-flight duel, then dispatch at most one more. Returns in seconds.
+    """Settle every in-flight duel, then dispatch at most one more. Returns in seconds.
 
     This used to duel every challenger *inline*, streaming each one to completion —
     so a single tick could take hours, during which the validator set no weights and
     published no dashboard. The duel wasn't the only thing blocked; the validator was.
 
-    Now the tick is bounded: settle whatever is in flight, dispatch the next one, come
-    back. Everything else in ``tick`` (weights, dashboard) therefore runs *every* tick,
-    even mid-duel.
+    Now the tick is bounded: settle whatever is in flight, dispatch the next one to
+    whichever configured eval server is free, come back. Everything else in ``tick``
+    (weights, dashboard) therefore runs *every* tick, even mid-duel. With several
+    ``EVAL_SERVER_URLS`` configured, several duels accumulate in flight across
+    successive ticks — one new dispatch per tick is enough to reach full utilization
+    within a handful of ticks, since a tick is ~60s against duels that run hours.
 
     A failing challenger must never block the ones behind it, so the dispatch loop
     still distinguishes:
 
-      * BUSY  -> ``break``    (a property of the SERVER: continuing would just 409)
-      * LOCAL -> ``break``    (a property of US: every challenger would fail the same)
+      * BUSY  -> ``break``    (a property of the SERVER(S): every configured one is busy)
+      * LOCAL -> ``break``    (a property of US: no configured server has working capacity)
       * error -> ``continue`` (a property of the CHALLENGER: everyone else proceeds)
     """
     # An unpinned corpus is a subnet-wide condition, not a per-challenger one: the exam
@@ -785,13 +890,23 @@ async def process_challengers(
         return
 
     if not await settle_inflight(subtensor, wallet, state, uid_map, store, block):
-        return  # a duel is still running; the tick moves on to weights + dashboard
+        return  # every configured server is still busy; the tick moves on to weights + dashboard
+
+    # With a single eval server this was structurally impossible: settle_inflight
+    # returning "free" meant the ONE slot had just emptied, so the loop below could
+    # never see the challenger it belonged to still pending. With several servers,
+    # one busy slot no longer blocks the whole loop — so an entry that already has a
+    # duel running on ANOTHER server must be skipped explicitly, or it would be
+    # dispatched a second time, wasting a second server on a duel already in flight.
+    inflight_keys = {_seen_key(s["hotkey"], s["model_digest"]) for s in state.inflight}
 
     for entry in entries:
         key = _seen_key(entry.hotkey, entry.model_digest)
 
         if key in state.seen_hotkeys or _is_current_king(state, entry):
             continue
+        if key in inflight_keys:
+            continue  # already being duelled on another eval server
         if state.is_quarantined(key):
             continue  # this artifact can never be evaluated
         if block < state.next_retry_block(key):
@@ -873,6 +988,7 @@ async def process_challengers(
                 await _note_failure(state, store, uid_map, entry, key, failure, block)
                 continue
 
+        busy_urls = {slot["eval_server_url"] for slot in state.inflight}
         try:
             block_hash = await subtensor.get_block_hash(entry.block)
             log(
@@ -880,9 +996,11 @@ async def process_challengers(
                 f"{state.king.get('hotkey','')[:12] or 'base'}...",
                 "info",
             )
-            eval_id = await start_duel(entry, state.king, block_hash)
+            free_url, eval_id = await _dispatch_to_first_free_server(
+                entry, state.king, block_hash, busy_urls
+            )
         except EvalBusy:
-            log("Eval server busy; challengers deferred to next tick", "warn")
+            log("Eval server(s) busy; challengers deferred to next tick", "warn")
             return
         except Exception as e:  # noqa: BLE001 — deliberate: classify, never crash the tick
             failure = classify(e)
@@ -893,21 +1011,23 @@ async def process_challengers(
             continue  # one bad challenger no longer blocks the rest
 
         # Persist the slot BEFORE returning: a crash between the POST and the flush
-        # would otherwise orphan a duel that is already burning GPU hours, and the
+        # would otherwise orphan a duel that is already burning GPU hours, and that
         # eval box would 409 everyone until it finished a job nobody was waiting for.
-        state.inflight = {
+        state.inflight.append({
             "eval_id": eval_id,
+            "eval_server_url": free_url,
             "hotkey": entry.hotkey,
             "model_repo": entry.model_repo,
             "model_digest": entry.model_digest,
             "block": entry.block,
             "king_digest": (state.king or {}).get("model_digest"),
             "dispatched_block": block,
-        }
+        })
         state.touch()
         await state.flush(store)
-        log(f"Duel {eval_id} dispatched; the tick continues (weights + dashboard stay live)", "info")
-        return  # one duel at a time — the eval server has one GPU
+        log(f"Duel {eval_id} dispatched to {free_url}; the tick continues "
+            "(weights + dashboard stay live)", "info")
+        return  # at most one NEW dispatch per tick — any freed slot is picked up next tick
 
 
 async def tick(
@@ -954,8 +1074,8 @@ async def main() -> None:
     wallet = bt.Wallet(name=WALLET_NAME, hotkey=HOTKEY_NAME)
     log(f"Wallet: {WALLET_NAME}/{HOTKEY_NAME}  Network: {NETWORK}  NetUID: {NETUID}", "info")
     log(
-        f"Eval server: {EVAL_SERVER_URL}  metric={SPEC.duel.metric}@{SPEC.duel.metric_device} "
-        f"n_clips={SPEC.duel.n_clips} delta={SPEC.duel.delta_threshold}",
+        f"Eval server(s): {', '.join(EVAL_SERVER_URLS)}  metric={SPEC.duel.metric}@"
+        f"{SPEC.duel.metric_device} n_clips={SPEC.duel.n_clips} delta={SPEC.duel.delta_threshold}",
         "info",
     )
     log(f"Consensus digest: {CONSENSUS_DIGEST}  (eval code: {eval_code_digest()})", "info")

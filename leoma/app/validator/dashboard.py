@@ -12,6 +12,8 @@ Shape (consumed by the leoma-app dashboard):
   stats{accepted,rejected,failed},
   queue[{hotkey,uid,model_repo,model_digest,block,status}],
   history[{hotkey,uid,model_repo,verdict,accepted,mu_hat,lcb,...}]  (newest first)
+  live_duels[{eval_id,hotkey,uid,model_repo,model_digest,dispatched_block,eval_server_url}]
+    (one entry per duel currently in flight — usually 0 or 1, more with several eval servers)
 """
 from __future__ import annotations
 
@@ -63,20 +65,23 @@ def build_dashboard(
 
     king = _king_entry(state.king, uid_map) if state.king else {}
 
-    # The duel currently on the GPU. The dashboard used to go dark for the entire
-    # length of a duel — hours in which the most interesting thing in the subnet was
-    # happening and the site showed nothing at all.
-    live = None
-    if state.inflight:
-        slot = dict(state.inflight)
-        live = {
+    # The duel(s) currently on the GPU(s). The dashboard used to go dark for the
+    # entire length of a duel — hours in which the most interesting thing in the
+    # subnet was happening and the site showed nothing at all. A list, not a single
+    # object, because a validator with several eval servers can have several duels
+    # running at once.
+    live_duels = [
+        {
             "eval_id": slot.get("eval_id"),
             "hotkey": slot.get("hotkey"),
             "uid": uid_map.get(slot.get("hotkey", "")),
             "model_repo": slot.get("model_repo"),
             "model_digest": slot.get("model_digest"),
             "dispatched_block": slot.get("dispatched_block"),
+            "eval_server_url": slot.get("eval_server_url"),
         }
+        for slot in (state.inflight or [])
+    ]
 
     return {
         "updated_at": updated_at,
@@ -87,7 +92,7 @@ def build_dashboard(
         "stats": dict(state.stats),
         "queue": list(queue or []),
         "history": list(state.history),
-        "live": live,
+        "live_duels": live_duels,
         # Why the validator is not crowning anyone, if it isn't: an unpinned corpus, a
         # missing seed digest, a stale eval box. Without this the operator sees a
         # subnet burning 100% to UID 0 and no reason anywhere.

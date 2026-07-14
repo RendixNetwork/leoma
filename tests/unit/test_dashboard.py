@@ -95,18 +95,34 @@ class TestLivePanel:
 
     def test_the_running_duel_is_published(self):
         st = KingState()
-        st.inflight = {
+        st.inflight = [{
             "eval_id": "eval-abc", "hotkey": "5a", "model_repo": "u/leoma-a",
             "model_digest": "sha256:" + "a" * 64, "dispatched_block": 900,
-        }
-        live = self._dash(st)["live"]
-        assert live["eval_id"] == "eval-abc"
-        assert live["hotkey"] == "5a"
-        assert live["uid"] == 7
-        assert live["dispatched_block"] == 900
+            "eval_server_url": "http://box-a:9000",
+        }]
+        live = self._dash(st)["live_duels"]
+        assert len(live) == 1
+        assert live[0]["eval_id"] == "eval-abc"
+        assert live[0]["hotkey"] == "5a"
+        assert live[0]["uid"] == 7
+        assert live[0]["dispatched_block"] == 900
+        assert live[0]["eval_server_url"] == "http://box-a:9000"
 
-    def test_no_duel_means_no_live_panel(self):
-        assert self._dash(KingState())["live"] is None
+    def test_several_duels_in_flight_are_all_published(self):
+        """A validator with several eval servers can have several duels running at
+        once — the whole point of not being limited to one in-flight slot."""
+        st = KingState()
+        st.inflight = [
+            {"eval_id": "eval-a", "hotkey": "5a", "model_repo": "u/leoma-a",
+             "model_digest": "sha256:" + "a" * 64, "dispatched_block": 900},
+            {"eval_id": "eval-b", "hotkey": "5b", "model_repo": "u/leoma-b",
+             "model_digest": "sha256:" + "b" * 64, "dispatched_block": 901},
+        ]
+        live = self._dash(st)["live_duels"]
+        assert [d["eval_id"] for d in live] == ["eval-a", "eval-b"]
+
+    def test_no_duel_means_an_empty_list_not_null(self):
+        assert self._dash(KingState())["live_duels"] == []
 
     def test_the_reason_the_subnet_is_burning_is_published(self):
         """Without this an operator sees 100% burning to UID 0 and no reason anywhere."""
