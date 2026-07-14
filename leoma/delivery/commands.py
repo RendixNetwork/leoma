@@ -70,6 +70,121 @@ def start_eval_server():
     eval_main()
 
 
+@cli.command()
+def preflight():
+    """Check whether this validator is ready to launch — a hard gate, not a hope.
+
+    Verifies every pin the subnet needs before it will crown anyone: the genesis
+    king, the corpus manifest, the consensus surface, and (if configured) that the
+    eval box is on the same chain.toml + scoring code. Exits non-zero if anything is
+    a hard FAIL, so it can gate a launch script.
+    """
+    import os
+
+    from leoma.bootstrap import emit_log as log, emit_header as log_header
+    from leoma.app.preflight import PASS, WARN, FAIL, run_preflight
+    from leoma.eval.codehash import eval_code_digest
+    from leoma.infra.chain_config import CONSENSUS_DIGEST, SEED_DIGEST, SPEC
+
+    log_header("Leoma Preflight")
+
+    # --- optional I/O the pure checks consume ---
+    corpus_fetched_digest = None
+    corpus_error = None
+    if SPEC.corpus.pinned:
+        try:
+            from leoma.eval.dataset import fetch_manifest
+            from leoma.infra.storage_backend import create_source_read_client
+
+            manifest = fetch_manifest(create_source_read_client(), SPEC.corpus)
+            corpus_fetched_digest = manifest.source_digest
+        except Exception as e:  # noqa: BLE001 — a fetch failure is a WARN, not a crash
+            corpus_error = str(e)
+
+    eval_health = None
+    eval_error = None
+    eval_url = os.environ.get("EVAL_SERVER_URL", "")
+    if eval_url:
+        try:
+            import httpx
+
+            eval_health = httpx.get(f"{eval_url}/health", timeout=httpx.Timeout(15.0)).json()
+        except Exception as e:  # noqa: BLE001
+            eval_error = str(e)
+
+    report = run_preflight(
+        seed_digest=SEED_DIGEST,
+        corpus_pinned=SPEC.corpus.pinned,
+        manifest_digest=SPEC.corpus.manifest_digest,
+        consensus_digest=CONSENSUS_DIGEST,
+        eval_code_digest=eval_code_digest(),
+        own_bucket=os.environ.get("R2_OWN_BUCKET"),
+        wallet_name=os.environ.get("WALLET_NAME"),
+        hotkey_name=os.environ.get("HOTKEY_NAME"),
+        corpus_fetched_digest=corpus_fetched_digest,
+        corpus_error=corpus_error,
+        eval_health=eval_health,
+        eval_error=eval_error,
+    )
+
+    icon = {PASS: "✓", WARN: "▲", FAIL: "✗"}
+    level = {PASS: "success", WARN: "warn", FAIL: "error"}
+    for c in report.checks:
+        log(f"{icon[c.status]} {c.name}: {c.detail}", level[c.status])
+
+    log_header("Ready" if report.ready else "NOT READY")
+    if report.ready:
+        msg = "all checks pass" if not report.warnings else f"ready ({len(report.warnings)} warning(s) — review above)"
+        log(msg, "success")
+    else:
+        log(f"{len(report.failures)} blocking failure(s) — the validator will burn to UID 0 until fixed", "error")
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("source", default="")
+@click.option("--require-live", is_flag=True, help="Also require an in-flight duel at snapshot time")
+def smoke(source, require_live):
+    """Confirm a testnet run actually exercised each expected outcome.
+
+    Reads a validator's published dashboard.json (a URL, a file path, or
+    LEOMA_DASHBOARD_URL) and checks that the rehearsal scenarios were observed: a
+    genuine crown, a fair rejection, a quarantined broken model, a copy-of-king
+    rejection, a freeze-cheat rejection. Reports exactly which behaviors have and
+    haven't been exercised yet, so you can drive the missing ones.
+    """
+    import json
+    import os
+
+    from leoma.bootstrap import emit_log as log, emit_header as log_header
+    from leoma.app.smoke import run_smoke
+
+    src = source or os.environ.get("LEOMA_DASHBOARD_URL", "")
+    if not src:
+        raise click.ClickException("give a dashboard.json URL or path (or set LEOMA_DASHBOARD_URL)")
+
+    log_header("Leoma Smoke — testnet scenarios")
+    if src.startswith("http://") or src.startswith("https://"):
+        import httpx
+
+        dash = httpx.get(src, timeout=httpx.Timeout(20.0)).json()
+    else:
+        with open(src) as f:
+            dash = json.load(f)
+
+    report = run_smoke(dash, require_live=require_live)
+    for s in report.scenarios:
+        log(f"{'✓' if s.observed else '·'} {s.description} — {s.evidence}",
+            "success" if s.observed else "warn")
+
+    log_header(f"{report.passed}/{report.total} scenarios observed")
+    if report.complete:
+        log("every rehearsal scenario was exercised and handled correctly", "success")
+    else:
+        log("still to drive: " + ", ".join(s.key for s in report.missing), "warn")
+        raise SystemExit(1)
+
+
 @cli.group()
 def corpus():
     """Video corpus management commands.
