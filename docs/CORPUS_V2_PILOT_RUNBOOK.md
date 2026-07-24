@@ -8,8 +8,9 @@ offline. Every published sample has all three artifacts:
 - a content-addressed `clips/<sha256>.mp4`.
 
 It does **not** change `chain.toml`, the active corpus-v1 manifest, or validator
-consensus. Corpus-v2 must be inspected, calibrated, and supported by evaluator-v2
-before its root digest can become active.
+consensus. The evaluator has version-gated v1/v2 readers, but corpus-v2 must still
+pass human QA, rights review, remote verification, testnet rehearsal, and calibration
+before its root key and digest can become active in a coordinated consensus release.
 
 The PNG contains exactly decoded truth frame 0. Every manifest entry pins the PNG
 object digest and its decoded RGB digest, so the evaluator can verify both the stored
@@ -226,7 +227,42 @@ venv/bin/leoma corpus v2 manifest \
 Shards are uploaded and verified first; the immutable root is the final object. Keep
 the printed root digest as an artifact. Do not paste it into `chain.toml` yet.
 
-## 7. Scale only in audited high-watermark batches
+## 7. Rehearse evaluator-v2 before activating the root
+
+Captioning is an offline build step. The evaluator reads the pinned caption and
+first-frame PNG from the selected manifest entries, so no Qwen process or dedicated
+caption GPU runs during a duel. All eight H100s can remain assigned to the four
+king/challenger eval pairs.
+
+On a testnet release branch, set both corpus fields to the uploaded immutable root:
+
+```toml
+[corpus]
+bucket = "leoma-source"
+manifest_key = "<printed-root-object-key>"
+manifest_digest = "<printed-sha256-root-digest>"
+```
+
+Changing either field changes the consensus digest. Deploy the exact same commit and
+`chain.toml` to the validator and all eval processes, then run:
+
+```bash
+venv/bin/leoma corpus verify --sample 4
+venv/bin/leoma corpus verify --sample 0
+venv/bin/leoma preflight
+```
+
+The v2 verifier checks the root, every visited shard, MP4 and PNG file digests, decoded
+truth-frame digest, decoded PNG RGB digest, and that the PNG is exactly truth frame
+zero. `--sample 0` reads every published MP4 and PNG and is therefore a deliberate,
+large production gate rather than a quick health check.
+
+Run the same-model controls and real challenger scenarios from the production runbook,
+then regenerate all calibration records against this exact root. Keep the prior
+manifest key, manifest digest, consensus digest, and deployment image as the rollback
+unit; never roll back only one validator or one eval process.
+
+## 8. Scale only in audited high-watermark batches
 
 After the pilot is accepted, reuse the same work directory and increase
 `--max-samples` by a fixed batch size, for example 10,000 at a time. For every batch,
