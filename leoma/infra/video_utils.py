@@ -113,6 +113,23 @@ async def get_video_duration(video_path: str) -> float:
         return 0.0
 
 
+def get_video_duration_sync(video_path: str) -> float:
+    """Synchronous duration probe for offline batch pipelines."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", video_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    _raise_ffmpeg_error(result, "probe video duration")
+    try:
+        return float((result.stdout or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise FFmpegError(f"Failed to parse video duration: {_decode_stderr(result.stderr)}") from exc
+
+
 async def get_video_resolution(video_path: str) -> tuple[int, int]:
     """Probe the first video stream for (width, height). Returns (0, 0) on failure."""
     result = await _run_process(
@@ -169,6 +186,25 @@ async def detect_scene_cuts(
             "null",
             "-",
         ],
+        text=True,
+    )
+    _raise_ffmpeg_error(result, "detect scene cuts")
+    output = f"{result.stdout or ''}\n{result.stderr or ''}"
+    return _parse_scene_cut_timestamps(output)
+
+
+def detect_scene_cuts_sync(
+    video_path: str,
+    scene_threshold: float = DEFAULT_SCENE_THRESHOLD,
+) -> List[float]:
+    """Synchronous scene detection for offline batch pipelines."""
+    result = subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-i", video_path,
+            "-vf", f"select='gt(scene,{scene_threshold})',showinfo",
+            "-f", "null", "-",
+        ],
+        capture_output=True,
         text=True,
     )
     _raise_ffmpeg_error(result, "detect scene cuts")

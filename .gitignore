@@ -17,6 +17,9 @@ venv/
 
 # Held-out corpus exam paper; publish to the protected source bucket, never Git.
 /manifest.json
+/corpus-v2-pilot/
+/corpus-v2-qa/
+/corpus-v2-manifest/
 
 # Docker volumes
 validator-data/
