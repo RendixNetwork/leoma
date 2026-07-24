@@ -130,10 +130,12 @@ first challenger must never be crowned. Rotate the corpus by rebuilding with a n
 re-pinning — a version bump, auditable in git.
 
 The captioned, sharded TI2V corpus-v2 builder is deliberately offline from the active
-v1 evaluator. Its bounded 10k pilot, eight-GPU captioning, human-QA gate, incremental
+v1 consensus. Its bounded 10k pilot, eight-GPU captioning, human-QA gate, incremental
 publication, and staged scale-up procedure are documented in
-[`docs/CORPUS_V2_PILOT_RUNBOOK.md`](docs/CORPUS_V2_PILOT_RUNBOOK.md). Do not pin a v2
-root until evaluator-v2 support and calibration have landed.
+[`docs/CORPUS_V2_PILOT_RUNBOOK.md`](docs/CORPUS_V2_PILOT_RUNBOOK.md). The evaluator
+can consume either pinned manifest version, but the shipped `chain.toml` stays on v1.
+Do not activate a v2 root until QA, rights review, full remote verification, testnet
+rehearsal, and calibration have all passed.
 
 ---
 

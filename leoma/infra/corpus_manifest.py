@@ -37,7 +37,9 @@ from leoma.eval.manifest import (
     MANIFEST_VERSION,
     ClipEntry,
     CorpusManifest,
+    CorpusManifestAny,
     DecodeParams,
+    SampleEntryV2,
     load_pinned_manifest,
     parse_manifest,
 )
@@ -193,7 +195,7 @@ def build_manifest(
 def verify_manifest(
     client,
     bucket: str,
-    manifest: CorpusManifest,
+    manifest: CorpusManifestAny,
     *,
     sample: Optional[int] = None,
     log: LogFn = _noop,
@@ -207,7 +209,11 @@ def verify_manifest(
 
     Returns the number of clips verified. Raises on the first mismatch.
     """
-    from leoma.eval.dataset import _fetch_and_decode
+    from leoma.eval.dataset import (
+        _fetch_and_decode,
+        _fetch_and_decode_v2,
+        iter_manifest_entries,
+    )
     from leoma.eval.video_runner import GenParams
 
     gen = GenParams(
@@ -217,12 +223,27 @@ def verify_manifest(
         height=manifest.decode.height,
     )
 
-    clips = manifest.clips if sample is None else manifest.clips[:sample]
-    for i, entry in enumerate(clips, 1):
-        # Raises CorpusIntegrityError on any hash mismatch — video or truth.
-        _fetch_and_decode(client, bucket, entry, gen)
-        log(f"[{i}/{len(clips)}] ok  {entry.clip_id}")
-    return len(clips)
+    total = len(manifest) if sample is None else min(int(sample), len(manifest))
+    entries = iter_manifest_entries(
+        manifest,
+        client=client,
+        bucket=bucket,
+        limit=total,
+    )
+    checked = 0
+    for checked, entry in enumerate(entries, 1):
+        # Raises CorpusIntegrityError on any hash mismatch — artifact bytes,
+        # decoded truth, conditioning PNG, or their frame-zero relationship.
+        if isinstance(entry, SampleEntryV2):
+            _fetch_and_decode_v2(client, bucket, entry, gen)
+        else:
+            _fetch_and_decode(client, bucket, entry, gen)
+        log(f"[{checked}/{total}] ok  {entry.clip_id}")
+    if checked != total:
+        raise RuntimeError(
+            f"manifest iteration returned {checked} entries but verification expected {total}"
+        )
+    return checked
 
 
 def write_manifest(manifest: CorpusManifest, path: str) -> str:
