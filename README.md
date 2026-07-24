@@ -129,6 +129,12 @@ burn 100% to UID 0.** That is deliberate: an unpinned corpus is not reproducible
 first challenger must never be crowned. Rotate the corpus by rebuilding with a new `corpus-id` and
 re-pinning — a version bump, auditable in git.
 
+The captioned, sharded TI2V corpus-v2 builder is deliberately offline from the active
+v1 evaluator. Its bounded 10k pilot, eight-GPU captioning, human-QA gate, incremental
+publication, and staged scale-up procedure are documented in
+[`docs/CORPUS_V2_PILOT_RUNBOOK.md`](docs/CORPUS_V2_PILOT_RUNBOOK.md). Do not pin a v2
+root until evaluator-v2 support and calibration have landed.
+
 ---
 
 ## Miner setup

@@ -35,6 +35,15 @@ test = [
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
 ]
+# Offline corpus-builder only. One copy of this stack is loaded per selected H100;
+# neither validators nor eval servers need it merely to consume a frozen manifest.
+caption = [
+    "av==18.0.0",
+    "torch==2.6.0",
+    "torchvision==0.21.0",
+    "transformers==5.14.1",
+    "accelerate==1.10.1",
+]
 # GPU eval server only (the box that downloads + runs miner models for duels).
 # Validators that just dispatch duels do not need these.
 eval = [

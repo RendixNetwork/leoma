@@ -269,6 +269,396 @@ def corpus_expand(count, concurrent, query):
     _run_async(run())
 
 
+@corpus.group("v2")
+def corpus_v2():
+    """Build the resumable, captioned, sharded corpus-v2 pilot."""
+
+
+def _pilot_ledger_path(workdir: str) -> str:
+    import os
+
+    return os.path.join(os.path.abspath(workdir), "pilot.sqlite3")
+
+
+@corpus_v2.command("inventory")
+@click.option("--target-samples", type=click.IntRange(min=1), default=2_000_000, show_default=True)
+@click.option("--windows-per-source", type=click.IntRange(min=1), default=8, show_default=True)
+def corpus_v2_inventory(target_samples, windows_per_source):
+    """Report whether the live source inventory can support a proposed sample target."""
+    import json
+    import math
+
+    from leoma.bootstrap import MIN_VIDEO_SIZE, SOURCE_BUCKET
+    from leoma.infra.chain_config import SPEC
+    from leoma.infra.storage_backend import create_source_read_client
+
+    if SOURCE_BUCKET != SPEC.corpus.bucket:
+        raise click.ClickException(
+            f"source bucket mismatch: runtime={SOURCE_BUCKET!r}, pinned={SPEC.corpus.bucket!r}"
+        )
+    objects = total_bytes = eligible = eligible_bytes = 0
+    try:
+        for obj in create_source_read_client().list_objects(SOURCE_BUCKET, recursive=True):
+            objects += 1
+            size = int(getattr(obj, "size", 0))
+            total_bytes += size
+            key = str(getattr(obj, "object_name", ""))
+            if key.lower().endswith((".mp4", ".mov", ".mkv", ".webm")) and size > MIN_VIDEO_SIZE:
+                eligible += 1
+                eligible_bytes += size
+    except Exception as exc:
+        raise click.ClickException(f"could not inventory {SOURCE_BUCKET!r}: {exc}") from None
+    minimum = math.ceil(target_samples / eligible) if eligible else None
+    report = {
+        "bucket": SOURCE_BUCKET,
+        "objects": objects,
+        "total_bytes": total_bytes,
+        "eligible_videos": eligible,
+        "eligible_bytes": eligible_bytes,
+        "windows_per_source": windows_per_source,
+        "theoretical_sample_ceiling": eligible * windows_per_source,
+        "target_samples": target_samples,
+        "minimum_accepted_windows_per_source_for_target": minimum,
+        "target_possible_at_configured_cap_before_filtering": bool(
+            eligible * windows_per_source >= target_samples
+        ),
+    }
+    click.echo(json.dumps(report, sort_keys=True))
+
+
+@corpus_v2.command("prepare")
+@click.option("--corpus-id", required=True, help="Immutable corpus version label")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+@click.option("--max-samples", type=click.IntRange(min=1), default=10_000, show_default=True)
+@click.option("--max-sources", type=click.IntRange(min=1), default=None)
+@click.option("--windows-per-source", type=click.IntRange(min=1), default=8, show_default=True)
+@click.option("--min-gap-seconds", type=click.FloatRange(min=5.0625), default=10.0, show_default=True)
+@click.option("--min-motion", type=click.FloatRange(min=0), default=1.5, show_default=True)
+@click.option(
+    "--workers", type=click.IntRange(min=1, max=64), default=8, show_default=True,
+    help="Concurrent source download/FFmpeg workers; results still commit deterministically",
+)
+def corpus_v2_prepare(
+    corpus_id,
+    workdir,
+    max_samples,
+    max_sources,
+    windows_per_source,
+    min_gap_seconds,
+    min_motion,
+    workers,
+):
+    """Prepare a bounded pilot from source videos, resuming from its SQLite ledger."""
+    import os
+    from leoma.bootstrap import MIN_VIDEO_SIZE, SOURCE_BUCKET, emit_header, emit_log
+    from leoma.infra.chain_config import SPEC
+    from leoma.infra.corpus_v2 import (
+        PilotLedger,
+        PilotSpec,
+        order_source_keys,
+        prepare_bucket_sources,
+    )
+    from leoma.infra.storage_backend import create_source_read_client
+
+    if SOURCE_BUCKET != SPEC.corpus.bucket:
+        raise click.ClickException(
+            f"source bucket mismatch: runtime={SOURCE_BUCKET!r}, pinned={SPEC.corpus.bucket!r}"
+        )
+    spec = PilotSpec(
+        corpus_id=corpus_id,
+        width=SPEC.gen.width,
+        height=SPEC.gen.height,
+        fps=SPEC.gen.fps,
+        num_frames=SPEC.gen.num_frames,
+        max_windows_per_source=windows_per_source,
+        min_window_gap_seconds=min_gap_seconds,
+        min_motion_energy=min_motion,
+    )
+    os.makedirs(workdir, exist_ok=True)
+    ledger = PilotLedger(_pilot_ledger_path(workdir), spec)
+    client = create_source_read_client()
+    eligible = [
+        obj.object_name
+        for obj in client.list_objects(SOURCE_BUCKET, recursive=True)
+        if obj.object_name.lower().endswith((".mp4", ".mov", ".mkv", ".webm"))
+        and int(getattr(obj, "size", 0)) > MIN_VIDEO_SIZE
+    ]
+    keys = order_source_keys(eligible, seed=corpus_id)
+    if max_sources is not None:
+        keys = keys[:max_sources]
+    emit_header("Corpus v2 — prepare pilot")
+    emit_log(
+        f"workdir={os.path.abspath(workdir)} target={max_samples} "
+        f"windows/source<={windows_per_source} workers={workers}", "info",
+    )
+    stats = prepare_bucket_sources(
+        client,
+        SOURCE_BUCKET,
+        ledger=ledger,
+        workdir=workdir,
+        spec=spec,
+        keys=keys,
+        max_samples=max_samples,
+        workers=workers,
+        log=lambda message: emit_log(message, "info"),
+    )
+    emit_log(f"pilot state: {stats}", "success")
+
+
+@corpus_v2.command("materialize-first-frames")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+@click.option("--limit", type=click.IntRange(min=1), default=None)
+def corpus_v2_materialize_first_frames(workdir, limit):
+    """Backfill lossless frame-zero PNGs for an existing retained pilot."""
+    import os
+
+    from leoma.bootstrap import emit_header, emit_log
+    from leoma.infra.corpus_v2 import PilotLedger, materialize_first_frame_images
+
+    ledger = PilotLedger(_pilot_ledger_path(workdir))
+    output_dir = os.path.join(os.path.abspath(workdir), "first-frames")
+    emit_header("Corpus v2 — materialize first frames")
+    try:
+        stats = materialize_first_frame_images(
+            ledger,
+            output_dir=output_dir,
+            limit=limit,
+            log=lambda message: emit_log(message, "info"),
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from None
+    emit_log(f"pilot state: {stats}", "success")
+
+
+@corpus_v2.command("caption")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+@click.option(
+    "--model", default="Qwen/Qwen3-VL-8B-Instruct", show_default=True,
+    help="Open-source native-video caption model repository",
+)
+@click.option(
+    "--revision", default="0c351dd01ed87e9c1b53cbc748cba10e6187ff3b", show_default=True,
+    help="Immutable 40-character Hugging Face commit hash",
+)
+@click.option("--gpus", default="0,1,2,3,4,5,6,7", show_default=True)
+@click.option("--frames", "frame_count", type=click.IntRange(min=2, max=32), default=16, show_default=True)
+@click.option("--max-new-tokens", type=click.IntRange(min=16, max=256), default=96, show_default=True)
+@click.option("--max-attempts", type=click.IntRange(min=1, max=10), default=3, show_default=True)
+@click.option(
+    "--follow/--drain", default=False, show_default=True,
+    help="Keep loaded GPU workers waiting for samples added by a running prepare job",
+)
+@click.option(
+    "--idle-timeout", type=click.FloatRange(min=10.0), default=600.0, show_default=True,
+    help="In follow mode, exit after the queue stays empty for this many seconds",
+)
+def corpus_v2_caption(
+    workdir,
+    model,
+    revision,
+    gpus,
+    frame_count,
+    max_new_tokens,
+    max_attempts,
+    follow,
+    idle_timeout,
+):
+    """Caption pending pilot clips with one persistent process per selected GPU."""
+    from leoma.bootstrap import emit_header, emit_log
+    from leoma.infra.video_caption import run_caption_workers
+
+    gpu_ids = [part.strip() for part in gpus.split(",") if part.strip()]
+    emit_header("Corpus v2 — caption")
+    emit_log(f"model={model}@{revision} GPUs={','.join(gpu_ids)}", "info")
+    try:
+        stats = run_caption_workers(
+            _pilot_ledger_path(workdir),
+            gpus=gpu_ids,
+            model=model,
+            revision=revision,
+            frame_count=frame_count,
+            max_new_tokens=max_new_tokens,
+            max_attempts=max_attempts,
+            follow=follow,
+            idle_timeout_seconds=idle_timeout,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from None
+    emit_log(f"pilot state: {stats}", "success")
+
+
+@corpus_v2.command("caption-retry-failed")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+def corpus_v2_caption_retry_failed(workdir):
+    """Return terminal caption failures to the queue after fixing their cause."""
+    from leoma.infra.corpus_v2 import PilotLedger
+
+    count = PilotLedger(_pilot_ledger_path(workdir)).retry_failed_captions()
+    click.echo(f"queued {count} failed samples for captioning")
+
+
+@corpus_v2.command("caption-reset-all")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+@click.option("--yes", is_flag=True, help="Confirm all captions and QA decisions will be cleared")
+def corpus_v2_caption_reset_all(workdir, yes):
+    """Clear all unpublished captions before deliberately changing caption settings."""
+    if not yes:
+        raise click.ClickException("refusing reset without --yes")
+    from leoma.infra.corpus_v2 import PilotLedger
+
+    try:
+        count = PilotLedger(_pilot_ledger_path(workdir)).reset_all_captions()
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"reset {count} samples; caption settings may now be rebound")
+
+
+@corpus_v2.command("qa-export")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+@click.option("--out", "output_dir", default="corpus-v2-qa", show_default=True)
+@click.option("--count", type=click.IntRange(min=1), default=200, show_default=True)
+@click.option("--seed", default="leoma-corpus-v2-qa-v1", show_default=True)
+def corpus_v2_qa_export(workdir, output_dir, count, seed):
+    """Export a deterministic, motion-stratified caption review sheet."""
+    from leoma.bootstrap import emit_header, emit_log
+    from leoma.infra.corpus_v2 import PilotLedger, export_qa_bundle
+
+    emit_header("Corpus v2 — export QA audit")
+    try:
+        review_path, html_path = export_qa_bundle(
+            PilotLedger(_pilot_ledger_path(workdir)),
+            output_dir=output_dir,
+            count=count,
+            seed=seed,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from None
+    emit_log(f"review sheet: {review_path}", "success")
+    emit_log(f"video gallery: {html_path}", "success")
+    emit_log("fill every verdict/reviewer field in reviews.jsonl, then run qa-import", "warn")
+
+
+@corpus_v2.command("qa-import")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+@click.option("--input", "input_path", required=True, type=click.Path(exists=True, dir_okay=False))
+def corpus_v2_qa_import(workdir, input_path):
+    """Import pass/fail decisions; failed captions are quarantined from publishing."""
+    import json
+
+    from leoma.infra.corpus_v2 import PilotLedger, import_qa_reviews
+
+    try:
+        report = import_qa_reviews(PilotLedger(_pilot_ledger_path(workdir)), input_path)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(json.dumps(report, sort_keys=True))
+
+
+@corpus_v2.command("qa-retry-rejected")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+def corpus_v2_qa_retry_rejected(workdir):
+    """Return QA-rejected clips to the caption queue for a corrected model/prompt."""
+    from leoma.infra.corpus_v2 import PilotLedger
+
+    count = PilotLedger(_pilot_ledger_path(workdir)).retry_qa_rejected()
+    click.echo(f"queued {count} QA-rejected samples for captioning")
+
+
+@corpus_v2.command("publish")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+@click.option("--prefix", required=True, help="Versioned bucket prefix, e.g. corpus-v2/pilot-10k")
+@click.option("--limit", type=click.IntRange(min=1), default=None)
+@click.option("--qa-min-reviews", type=click.IntRange(min=0), default=200, show_default=True)
+@click.option(
+    "--qa-min-pass-rate", type=click.FloatRange(min=0.0, max=1.0),
+    default=0.95, show_default=True,
+)
+@click.option("--delete-local-after-upload/--keep-local", default=True, show_default=True)
+def corpus_v2_publish(
+    workdir, prefix, limit, qa_min_reviews, qa_min_pass_rate, delete_local_after_upload,
+):
+    """Upload captioned clip/first-frame pairs and checkpoint each verified sample."""
+    from leoma.bootstrap import SOURCE_BUCKET, emit_header, emit_log
+    from leoma.infra.chain_config import SPEC
+    from leoma.infra.corpus_v2 import PilotLedger, publish_captioned_samples
+    from leoma.infra.storage_backend import create_source_write_client
+
+    if SOURCE_BUCKET != SPEC.corpus.bucket:
+        raise click.ClickException(
+            f"source bucket mismatch: runtime={SOURCE_BUCKET!r}, pinned={SPEC.corpus.bucket!r}"
+        )
+    ledger = PilotLedger(_pilot_ledger_path(workdir))
+    emit_header("Corpus v2 — publish clips and first frames")
+    try:
+        stats = publish_captioned_samples(
+            create_source_write_client(),
+            SOURCE_BUCKET,
+            ledger=ledger,
+            prefix=prefix,
+            limit=limit,
+            qa_min_reviews=qa_min_reviews,
+            qa_min_pass_rate=qa_min_pass_rate,
+            delete_local_after_upload=delete_local_after_upload,
+            log=lambda message: emit_log(message, "info"),
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from None
+    emit_log(f"pilot state: {stats}", "success")
+
+
+@corpus_v2.command("manifest")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+@click.option("--prefix", required=True, help="Same versioned prefix used by publish")
+@click.option("--out", "output_dir", default="corpus-v2-manifest", show_default=True)
+@click.option("--shard-size", type=click.IntRange(min=100, max=100_000), default=5_000, show_default=True)
+@click.option("--upload/--no-upload", default=False, show_default=True)
+def corpus_v2_manifest(workdir, prefix, output_dir, shard_size, upload):
+    """Build manifest shards and optionally publish the immutable root last."""
+    from leoma.bootstrap import SOURCE_BUCKET, emit_header, emit_log
+    from leoma.infra.corpus_v2 import PilotLedger, build_sharded_manifest, publish_manifest_bundle
+    from leoma.infra.storage_backend import create_source_write_client
+
+    ledger = PilotLedger(_pilot_ledger_path(workdir))
+    stats = ledger.stats()
+    unfinished = sum(count for status, count in stats["samples"].items()
+                     if status not in {"published", "excluded"})
+    if unfinished:
+        raise click.ClickException(
+            f"refusing a partial root manifest: {unfinished} samples are not published ({stats})"
+        )
+    emit_header("Corpus v2 — build manifest")
+    try:
+        root_path, digest = build_sharded_manifest(
+            ledger, output_dir=output_dir, shard_size=shard_size,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from None
+    emit_log(f"root={root_path}", "success")
+    emit_log(f"digest={digest}", "success")
+    if upload:
+        try:
+            key, uploaded_digest = publish_manifest_bundle(
+                create_source_write_client(), SOURCE_BUCKET,
+                root_path=root_path, prefix=prefix,
+            )
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from None
+        emit_log(f"published root: s3://{SOURCE_BUCKET}/{key}", "success")
+        emit_log(f"pin this digest only after evaluator-v2 support: {uploaded_digest}", "warn")
+
+
+@corpus_v2.command("status")
+@click.option("--workdir", default="corpus-v2-pilot", show_default=True)
+def corpus_v2_status(workdir):
+    """Print resumable preparation/caption/publish counts."""
+    import json
+
+    from leoma.infra.corpus_v2 import PilotLedger
+
+    ledger = PilotLedger(_pilot_ledger_path(workdir))
+    click.echo(json.dumps(ledger.stats(), sort_keys=True))
+
+
 @corpus.command("build-manifest")
 @click.option("--corpus-id", required=True, help="Version label for this corpus, e.g. leoma-corpus-v1")
 @click.option("--out", "-o", default="manifest.json", help="Where to write the manifest")

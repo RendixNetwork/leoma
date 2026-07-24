@@ -1,5 +1,6 @@
 """Operator-safety checks for corpus manifest CLI commands."""
 
+import json
 from types import SimpleNamespace
 
 from click.testing import CliRunner
@@ -171,3 +172,30 @@ def test_publish_manifest_refuses_an_undersized_exam_before_upload(monkeypatch, 
     assert result.exit_code != 0
     assert "could not publish a duel-ready manifest" in result.output
     assert "needs at least 640 clips" in result.output
+
+
+def test_v2_inventory_reports_that_a_target_exceeds_the_source_cap(monkeypatch):
+    class Client:
+        def list_objects(self, bucket, recursive):
+            return [
+                SimpleNamespace(object_name="a.mp4", size=2_000_000),
+                SimpleNamespace(object_name="b.mov", size=3_000_000),
+                SimpleNamespace(object_name="notes.txt", size=4_000_000),
+                SimpleNamespace(object_name="tiny.mp4", size=1),
+            ]
+
+    monkeypatch.setattr(bootstrap, "SOURCE_BUCKET", SPEC.corpus.bucket)
+    monkeypatch.setattr(storage_backend, "create_source_read_client", Client)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "corpus", "v2", "inventory", "--target-samples", "20",
+            "--windows-per-source", "8",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["eligible_videos"] == 2
+    assert report["theoretical_sample_ceiling"] == 16
+    assert report["minimum_accepted_windows_per_source_for_target"] == 10
+    assert report["target_possible_at_configured_cap_before_filtering"] is False
