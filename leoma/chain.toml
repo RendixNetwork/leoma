@@ -61,8 +61,8 @@ seed_digest = "sha256:79e4cc89edd935e8ea843ae2bd80fb85d3444128bb946990109a33ffaf
 #   leoma corpus build-manifest --out manifest.json
 #   leoma corpus publish-manifest manifest.json    # prints the digest to paste below
 bucket = "leoma-source"
-manifest_key = "manifests/leoma-testnet-v1.json"
-manifest_digest = "sha256:723a48e655ee7087bd7750892b8e98bc48bd7b61b5097de7e55a020c26a8c159"
+manifest_key = "corpus-v2/leoma-ti2v-pilot-10k-v1/manifests/leoma-ti2v-pilot-10k-v1/root-87beb623ffd9b952a3c1838670fc1d6c26ebbb3fe828c1a62d49831a887a7fc8.json"
+manifest_digest = "sha256:87beb623ffd9b952a3c1838670fc1d6c26ebbb3fe828c1a62d49831a887a7fc8"
 
 [gen]
 # How king and challenger generate. Identical for both, always.
