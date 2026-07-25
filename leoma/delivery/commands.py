@@ -568,6 +568,13 @@ def corpus_v2_qa_retry_rejected(workdir):
 @click.option("--workdir", default="corpus-v2-pilot", show_default=True)
 @click.option("--prefix", required=True, help="Versioned bucket prefix, e.g. corpus-v2/pilot-10k")
 @click.option("--limit", type=click.IntRange(min=1), default=None)
+@click.option(
+    "--workers",
+    type=click.IntRange(min=1, max=128),
+    default=1,
+    show_default=True,
+    help="Concurrent verified sample-pair uploads",
+)
 @click.option("--qa-min-reviews", type=click.IntRange(min=0), default=200, show_default=True)
 @click.option(
     "--qa-min-pass-rate", type=click.FloatRange(min=0.0, max=1.0),
@@ -575,7 +582,13 @@ def corpus_v2_qa_retry_rejected(workdir):
 )
 @click.option("--delete-local-after-upload/--keep-local", default=True, show_default=True)
 def corpus_v2_publish(
-    workdir, prefix, limit, qa_min_reviews, qa_min_pass_rate, delete_local_after_upload,
+    workdir,
+    prefix,
+    limit,
+    workers,
+    qa_min_reviews,
+    qa_min_pass_rate,
+    delete_local_after_upload,
 ):
     """Upload captioned clip/first-frame pairs and checkpoint each verified sample."""
     from leoma.bootstrap import SOURCE_BUCKET, emit_header, emit_log
@@ -596,6 +609,7 @@ def corpus_v2_publish(
             ledger=ledger,
             prefix=prefix,
             limit=limit,
+            workers=workers,
             qa_min_reviews=qa_min_reviews,
             qa_min_pass_rate=qa_min_pass_rate,
             delete_local_after_upload=delete_local_after_upload,

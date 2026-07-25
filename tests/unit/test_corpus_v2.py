@@ -574,6 +574,75 @@ class _MemoryObjectStore:
         self.objects[(bucket, key)] = (Path(path).read_bytes(), stored)
 
 
+class _ConcurrentMemoryObjectStore(_MemoryObjectStore):
+    def __init__(self):
+        super().__init__()
+        self._active = 0
+        self._lock = threading.Lock()
+        self.max_active = 0
+
+    def fput_object(self, bucket, key, path, *, content_type, metadata):
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        try:
+            time.sleep(0.01)
+            super().fput_object(
+                bucket,
+                key,
+                path,
+                content_type=content_type,
+                metadata=metadata,
+            )
+        finally:
+            with self._lock:
+                self._active -= 1
+
+
+def test_publish_workers_upload_concurrently_and_checkpoint_before_delete(tmp_path):
+    ledger = PilotLedger(tmp_path / "pilot.sqlite3", _spec())
+    _bind_caption(ledger)
+    local_paths = []
+    for index in range(6):
+        original = _sample(
+            tmp_path,
+            sample_id=f"{index + 500:064x}",
+            truth="sha256:" + f"{index + 600:064x}",
+        )
+        sample = PreparedSample(**{
+            **original.__dict__,
+            "source_key": f"raw/concurrent-{index}.mp4",
+            "source_sha256": "sha256:" + f"{index + 700:064x}",
+            "source_start_ms": index * 10_000,
+        })
+        local_paths.extend((Path(sample.clip_path), Path(sample.first_frame_path)))
+        ledger.add_sample(sample)
+        task = ledger.claim_caption("gpu-0")
+        ledger.finish_caption(
+            task.sample_id,
+            caption="A person walks through a room while the camera follows behind.",
+            model="org/caption-model",
+            revision="f" * 40,
+            worker="gpu-0",
+            frame_count=16,
+        )
+
+    store = _ConcurrentMemoryObjectStore()
+    result = publish_captioned_samples(
+        store,
+        "bucket",
+        ledger=ledger,
+        prefix="corpus-v2/concurrent",
+        workers=3,
+        delete_local_after_upload=True,
+    )
+
+    assert result["published_this_run"] == 6
+    assert result["samples"] == {"published": 6}
+    assert store.max_active >= 2
+    assert not any(path.exists() for path in local_paths)
+
+
 def test_approved_publish_batch_resumes_without_requiring_the_audit_twice(tmp_path):
     ledger = PilotLedger(tmp_path / "pilot.sqlite3", _spec())
     _bind_caption(ledger)

@@ -1290,6 +1290,7 @@ def publish_captioned_samples(
     ledger: PilotLedger,
     prefix: str,
     limit: Optional[int] = None,
+    workers: int = 1,
     qa_min_reviews: int = 0,
     qa_min_pass_rate: float = 0.0,
     delete_local_after_upload: bool = False,
@@ -1299,6 +1300,8 @@ def publish_captioned_samples(
     clean_prefix = prefix.strip("/")
     if not clean_prefix:
         raise ValueError("a versioned publish prefix is required")
+    if workers < 1:
+        raise ValueError("publish workers must be at least one")
     ledger.approve_publish_batch(
         min_reviews=qa_min_reviews,
         min_pass_rate=qa_min_pass_rate,
@@ -1311,7 +1314,8 @@ def publish_captioned_samples(
         params = (int(limit),)
     with ledger.connect() as db:
         approved_rows = list(db.execute(query, params))
-    for row in approved_rows:
+
+    def upload_pair(row: sqlite3.Row) -> tuple[str, str, str, str, str]:
         clip_path = str(row["clip_path"])
         first_frame_path = str(row["first_frame_path"])
         if not os.path.isfile(clip_path):
@@ -1385,14 +1389,49 @@ def publish_captioned_samples(
                     f"s3://{bucket}/{first_frame_key}"
                 )
 
-        ledger.mark_published(row["sample_id"], clip_key, first_frame_key)
+        return (
+            str(row["sample_id"]),
+            clip_key,
+            first_frame_key,
+            clip_path,
+            first_frame_path,
+        )
+
+    def checkpoint(result: tuple[str, str, str, str, str]) -> None:
+        nonlocal published
+        sample_id, clip_key, first_frame_key, clip_path, first_frame_path = result
+        ledger.mark_published(sample_id, clip_key, first_frame_key)
         if delete_local_after_upload:
             Path(clip_path).unlink(missing_ok=True)
             Path(first_frame_path).unlink(missing_ok=True)
         published += 1
-        log(
-            f"published {row['sample_id']} -> {clip_key} + {first_frame_key}"
-        )
+        log(f"published {sample_id} -> {clip_key} + {first_frame_key}")
+
+    if workers == 1:
+        for row in approved_rows:
+            checkpoint(upload_pair(row))
+    else:
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+        # Keep the in-flight set bounded. If a worker fails, at most twice the
+        # configured concurrency can have uploaded but not yet checkpointed.
+        # Resumption safely verifies and reuses those content-addressed objects.
+        pending = set()
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="corpus-v2-publish",
+        ) as pool:
+            for row in approved_rows:
+                pending.add(pool.submit(upload_pair, row))
+                if len(pending) < workers * 2:
+                    continue
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    checkpoint(future.result())
+            while pending:
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    checkpoint(future.result())
     return {**ledger.stats(), "published_this_run": published}
 
 
