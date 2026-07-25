@@ -6,11 +6,21 @@ serialisation/parsing (``build_reveal_v4`` / ``parse_reveal_v4``), and the diges
 regex — the pieces exercised by the miner and the validator's on-chain scan.
 """
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
+import leoma.infra.model_store as ms
 from leoma.infra.model_store import (
     DIGEST_RE,
+    HUB_PASSWORD_ENV_NAMES,
+    HUB_TOKEN_ENV_NAMES,
+    HUB_USERNAME_ENV_NAMES,
+    HippiusHubAuthError,
     ModelRef,
+    _call_snapshot_download,
+    _prepare_upload_token,
     build_reveal_v4,
     parse_reveal_v4,
 )
@@ -20,6 +30,70 @@ HOTKEY = "5C7LM2i42XgL2oB4x3rcmB7KDiof4B92KZzUpg5miZ6DogjU"
 SHA256_DIGEST = "sha256:" + "a" * 64
 HF_DIGEST = "hf:" + "b" * 40
 REPO = f"user/leoma-mymodel-{HOTKEY}"
+
+
+def _clear_hub_auth(monkeypatch, tmp_path):
+    for name in (*HUB_TOKEN_ENV_NAMES, *HUB_USERNAME_ENV_NAMES, *HUB_PASSWORD_ENV_NAMES):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ms, "HUB_TOKEN_PATH", tmp_path / "missing-token")
+
+
+class TestPublicHubReads:
+    def test_public_model_download_is_anonymous_without_operator_auth(
+        self, monkeypatch, tmp_path
+    ):
+        _clear_hub_auth(monkeypatch, tmp_path)
+        captured = {}
+
+        def snapshot_download(**kwargs):
+            captured.update(kwargs)
+            return kwargs["local_dir"]
+
+        monkeypatch.setitem(
+            sys.modules,
+            "hippius_hub",
+            SimpleNamespace(snapshot_download=snapshot_download),
+        )
+        target = tmp_path / "snapshot"
+
+        result = _call_snapshot_download(
+            ModelRef(REPO, SHA256_DIGEST),
+            str(target),
+            2,
+        )
+
+        assert result == str(target)
+        assert captured["token"] is None
+        assert captured["revision"] == SHA256_DIGEST
+
+    def test_operator_read_token_is_used_when_configured(self, monkeypatch, tmp_path):
+        _clear_hub_auth(monkeypatch, tmp_path)
+        monkeypatch.setenv("HIPPIUS_HUB_TOKEN", "validator-read-token")
+        captured = {}
+
+        def snapshot_download(**kwargs):
+            captured.update(kwargs)
+            return kwargs["local_dir"]
+
+        monkeypatch.setitem(
+            sys.modules,
+            "hippius_hub",
+            SimpleNamespace(snapshot_download=snapshot_download),
+        )
+
+        _call_snapshot_download(
+            ModelRef(REPO, SHA256_DIGEST),
+            str(tmp_path / "snapshot"),
+            2,
+        )
+
+        assert captured["token"] == "validator-read-token"
+
+    def test_upload_still_requires_authentication(self, monkeypatch, tmp_path):
+        _clear_hub_auth(monkeypatch, tmp_path)
+
+        with pytest.raises(HippiusHubAuthError, match="Uploading public model requires"):
+            _prepare_upload_token("Uploading public model")
 
 
 class TestDigestRegex:

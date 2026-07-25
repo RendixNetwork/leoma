@@ -46,7 +46,8 @@ and Hippius Hub 0.6.1.
 Create `.env` on the GPU host and never commit it:
 
 ```dotenv
-HIPPIUS_HUB_TOKEN=<model-registry-token>
+# Optional for public miner repositories; set for private genesis access/rate limits.
+HIPPIUS_HUB_TOKEN=
 OBJECT_STORAGE_BACKEND=hippius
 HIPPIUS_ENDPOINT=s3.hippius.com
 HIPPIUS_REGION=decentralized
@@ -161,8 +162,9 @@ Never publish ports 9000-9003 directly to the internet.
 
 ## 8. Validator configuration and preflight
 
-The validator needs its wallet, durable state bucket, Hippius Hub token for config
-prescreen, corpus read credentials, the same Bearer token, and all four URLs:
+The validator needs its wallet, durable state bucket, corpus read credentials, the
+same Bearer token, and all four URLs. A Hippius Hub read token is optional because
+public miner configs are fetched anonymously:
 
 ```dotenv
 NETWORK=finney
@@ -171,7 +173,7 @@ WALLET_NAME=<coldkey-name>
 HOTKEY_NAME=<validator-hotkey-name>
 EVAL_SERVER_URLS=http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003
 LEOMA_EVAL_TOKEN=<same-shared-token>
-HIPPIUS_HUB_TOKEN=<model-registry-token>
+HIPPIUS_HUB_TOKEN=
 OBJECT_STORAGE_BACKEND=hippius
 HIPPIUS_ENDPOINT=s3.hippius.com
 HIPPIUS_REGION=decentralized
