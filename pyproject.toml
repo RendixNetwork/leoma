@@ -6,8 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9.0,<4",
-    "async-substrate-interface==1.6.4",
-    "bittensor==9.12.2",
+    # 9.12.2 cannot encode the current testnet runtime's composite netuid type.
+    # 10.5.0 retains AsyncSubtensor (removed in 11.x) and supports that runtime.
+    "bittensor==10.5.0",
     "python-dotenv>=1.0.0",
     "huggingface-hub",
     "hippius-hub==0.6.1",
