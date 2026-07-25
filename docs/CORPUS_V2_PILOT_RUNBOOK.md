@@ -191,7 +191,8 @@ the successful publish gate permanently excludes them.
 ```bash
 venv/bin/leoma corpus v2 publish \
   --workdir "$WORK" \
-  --prefix corpus-v2/leoma-ti2v-pilot-10k-v1
+  --prefix corpus-v2/leoma-ti2v-pilot-10k-v1 \
+  --workers 64
 ```
 
 Every MP4 and PNG is uploaded under its own content digest, then checked by size and
@@ -199,7 +200,9 @@ SHA-256 object metadata. A ledger row advances to `published` only after both ob
 verify. The default removes both local files only after that checkpoint. An
 interrupted command resumes the already-approved batch without requiring the same
 200 audited rows to remain unpublished. Use `--keep-local` only when NVMe capacity
-has been planned.
+has been planned. Concurrent publishing keeps a bounded set of pairs in flight;
+successful uploads remain content-addressed and resumable even if another worker
+fails before they are checkpointed.
 
 For a non-production smoke test with fewer than 200 total clips, the QA threshold can
 be explicitly reduced. Never use this override for the real corpus:
