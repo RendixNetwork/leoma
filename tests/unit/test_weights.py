@@ -125,6 +125,27 @@ class TestMaybeSetWeights:
         assert st.weight_failures == 0        # a no-op is not a failure
         assert st.next_weight_block == 0      # and does not trigger backoff
 
+    async def test_sdk_10_blank_no_op_uses_the_chain_weight_clock(self):
+        """10.5 returns ``ExtrinsicResponse(False)`` with no message when its
+        internal clock says too soon. The public chain clock is authoritative."""
+        sub, st, store = _FakeSubtensor(False, too_soon=True), _state_with_king(), _store()
+
+        ok = await maybe_set_weights(sub, _Wallet(), st, {"5A": 7}, store, force=True)
+
+        assert ok is False
+        assert st.last_weight_block == 0
+        assert st.weight_failures == 0
+        assert st.next_weight_block == 0
+
+    async def test_blank_failure_is_genuine_when_the_chain_is_not_rate_limited(self):
+        sub, st, store = _FakeSubtensor(False, too_soon=False), _state_with_king(), _store()
+
+        ok = await maybe_set_weights(sub, _Wallet(), st, {"5A": 7}, store, force=True)
+
+        assert ok is False
+        assert st.weight_failures == 1
+        assert st.next_weight_block > sub.block
+
     async def test_genuine_failure_does_not_advance_and_backs_off(self):
         sub, st, store = _FakeSubtensor((False, "Subtensor error")), _state_with_king(), _store()
         st.last_weight_block = 0

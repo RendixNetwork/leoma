@@ -8,12 +8,15 @@ module.exports = {
   apps: [
     {
       name: "leoma-validator",
-      script: "leoma",
+      script: process.env.LEOMA_BIN || "leoma",
       args: "serve",
       interpreter: "none",
       autorestart: true,
       max_restarts: 1000,
       env: {
+        // PM2 pipes stdout, so Python otherwise block-buffers successful tick logs
+        // until process exit. Production health must be observable in real time.
+        PYTHONUNBUFFERED: process.env.PYTHONUNBUFFERED || "1",
         NETWORK: process.env.NETWORK || "finney",
         NETUID: process.env.NETUID || "99",
         WALLET_NAME: process.env.WALLET_NAME || "default",

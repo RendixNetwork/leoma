@@ -40,7 +40,11 @@ from leoma.infra.chain_config import (
 from leoma.eval.codehash import eval_code_digest
 from leoma.eval.errors import ConsensusConfigError
 from leoma.eval.spec import verify_echo
-from leoma.app.validator.reveal_scan import scan_reveals, ChallengerEntry
+from leoma.app.validator.reveal_scan import (
+    ChallengerEntry,
+    decode_scale_revealed_message,
+    scan_reveals,
+)
 from leoma.app.validator.state_store import (
     JsonBucketStore,
     KingState,
@@ -163,6 +167,65 @@ async def refresh_uid_map(subtensor: bt.AsyncSubtensor) -> dict[str, int]:
     meta = await subtensor.metagraph(NETUID)
     hotkeys = list(getattr(meta, "hotkeys", []) or [])
     return {hk: uid for uid, hk in enumerate(hotkeys)}
+
+
+async def _load_revealed_commitments(
+    subtensor: bt.AsyncSubtensor, block: int
+) -> dict[str, tuple[tuple[int, str], ...]]:
+    """Read commitments across Bittensor async-client wire representations.
+
+    The SDK's public helper is preferred.  Bittensor 10.5 paired with newer
+    ``async-substrate-interface`` releases can receive SCALE bytes as a latin-1
+    string, while its decoder assumes hex and raises ``ValueError``.  One legacy
+    commitment then prevents every miner from being scanned.
+
+    Fall back only for decoding/type failures, not network failures.  An
+    undecodable history item is retained as an empty payload so a malformed latest
+    reveal cannot expose (and accidentally re-queue) an older valid reveal.
+    """
+    try:
+        return await subtensor.get_all_revealed_commitments(NETUID, block=block)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        log(
+            "Bittensor commitment decoder rejected raw chain data; "
+            f"using strict compatibility decoder ({type(exc).__name__})",
+            "warn",
+        )
+
+    query = await subtensor.query_map(
+        module="Commitments",
+        name="RevealedCommitments",
+        params=[NETUID],
+        block=block,
+    )
+    result: dict[str, tuple[tuple[int, str], ...]] = {}
+    invalid = 0
+
+    async for hotkey, raw_history in query:
+        history: list[tuple[int, str]] = []
+        history_invalid = False
+        for item in raw_history:
+            try:
+                encoded, reveal_block = item
+                reveal_block = int(reveal_block)
+            except (TypeError, ValueError):
+                history_invalid = True
+                invalid += 1
+                break
+            try:
+                payload = decode_scale_revealed_message(encoded)
+            except ValueError:
+                # Preserve the item's position. scan_reveals deliberately uses the
+                # latest reveal and must not backfill an older valid submission.
+                payload = ""
+                invalid += 1
+            history.append((reveal_block, payload))
+
+        result[str(hotkey)] = () if history_invalid else tuple(history)
+
+    if invalid:
+        log(f"Ignored {invalid} undecodable on-chain commitment item(s)", "warn")
+    return result
 
 
 async def preflight_eval_server(client, eval_server_url: str = EVAL_SERVER_URL) -> None:
@@ -422,9 +485,14 @@ async def maybe_set_weights(
 
     success, message = _unpack_set_weights(result)
     if not success:
-        if _is_rate_limited(message):
+        # Bittensor 10.5's ExtrinsicResponse leaves ``message`` empty when its
+        # internal weight-clock guard makes no attempt. Confirm against the chain
+        # before calling that blank response a failure; a genuine blank failure
+        # still falls through to the normal backoff.
+        if _is_rate_limited(message) or await _chain_says_too_soon(subtensor, wallet):
             # A no-op, not a failure: do NOT advance last_weight_block.
-            log(f"[{current_block}] set_weights rate-limited ({message}); retrying next tick", "warn")
+            detail = message or "chain weight clock says too soon"
+            log(f"[{current_block}] set_weights rate-limited ({detail}); retrying next tick", "warn")
             return False
         return _weight_failed(state, current_block, message)
 
@@ -1088,7 +1156,7 @@ async def tick(
     uid_map = await refresh_uid_map(subtensor)
     ensure_genesis_king(state, block)
 
-    commits = await subtensor.get_all_revealed_commitments(NETUID, block=block)
+    commits = await _load_revealed_commitments(subtensor, block)
     # Hotkeys with several quarantined artifacts are dropped at scan time — this
     # finally wires reveal_scan's long-dead `blacklist=` hook.
     # Two distinct reasons a hotkey stops being scanned: several unevaluable artifacts
