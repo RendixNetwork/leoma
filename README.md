@@ -145,24 +145,53 @@ rehearsal, and calibration have all passed.
 
 Fine-tune the pinned base architecture (see `chain.toml`), then upload the weights and commit.
 
-### 1. Upload weights to Hippius Hub
+### 1. Create a public Hippius Hub repository
 
-```bash
-leoma miner push --model-dir ./out --repo <user>/leoma-<name>-<your-hotkey-ss58>
+Create the repository in Hippius Hub before the first upload. The repository name must
+**start with `leoma`** and **end with your miner hotkey** (SS58):
+
+```text
+<user-or-project>/leoma-<model-name>-<your-hotkey-ss58>
 ```
 
-The repo name must **start with `leoma`** and **end with your hotkey** (SS58). The command prints the
-immutable `repo@digest` to commit.
+Keep the repository public so validators can download the submitted model without
+knowing your Hub credentials.
 
-### 2. Commit the reveal on-chain
+### 2. Upload weights to Hippius Hub
 
 ```bash
-leoma miner commit --repo <user>/leoma-<name>-<hotkey> --digest sha256:<...> \
+leoma miner push \
+  --model-dir ./out \
+  --repo <user-or-project>/leoma-<model-name>-<your-hotkey-ss58> \
+  --revision submission-001
+```
+
+`--revision` is an optional, mutable upload label such as `submission-001`. If it is
+omitted, Hippius Hub uses `main`; `v1` is not an automatic Leoma default. Reuse the
+same repository with a new revision label for later submissions.
+
+The upload prints an immutable reference:
+
+```text
+<repo>@sha256:<64-hex-digest>
+```
+
+The revision organizes uploads, but it is **not** submitted to validators. The returned
+digest identifies the exact snapshot and cannot silently move when a tag changes.
+
+### 3. Commit the immutable reveal on-chain
+
+```bash
+leoma miner commit --repo <user-or-project>/leoma-<model-name>-<hotkey> --digest sha256:<...> \
   --coldkey <wallet-name> --hotkey <hotkey-name>
 ```
 
-Your wallet must be registered on the subnet. Validators will discover the reveal, duel your model
-against the king, and crown it if it wins.
+Only `repo + digest + hotkey` are written in the `v4` chain reveal. Validators download
+the public model directly as `repo@digest`; they do not need the upload revision or
+your Hippius Hub token.
+
+Your wallet must be registered on the subnet. Validators will discover the reveal,
+duel your model against the king, and crown it if it wins.
 
 ---
 
