@@ -102,6 +102,19 @@ def preflight():
         except Exception as e:  # noqa: BLE001 — a fetch failure is a WARN, not a crash
             corpus_error = str(e)
 
+    dashboard_bucket = os.environ.get("LEOMA_DASHBOARD_BUCKET")
+    own_bucket = os.environ.get("R2_OWN_BUCKET")
+    dashboard_error = None
+    if dashboard_bucket and dashboard_bucket != own_bucket:
+        try:
+            from leoma.infra.storage_backend import create_dashboard_write_client
+
+            dashboard_client = create_dashboard_write_client()
+            if not dashboard_client.bucket_exists(dashboard_bucket):
+                dashboard_error = "bucket does not exist"
+        except Exception as e:  # noqa: BLE001 — dashboard delivery is non-consensus
+            dashboard_error = str(e)
+
     # EVAL_SERVER_URLS (plural) lets an operator configure several independently-run
     # eval-server processes; checking only EVAL_SERVER_URL here would silently skip
     # every server but the first. _parse_eval_server_urls is the same pure parser the
@@ -135,7 +148,9 @@ def preflight():
         manifest_digest=SPEC.corpus.manifest_digest,
         consensus_digest=CONSENSUS_DIGEST,
         eval_code_digest=eval_code_digest(),
-        own_bucket=os.environ.get("R2_OWN_BUCKET"),
+        own_bucket=own_bucket,
+        dashboard_bucket=dashboard_bucket,
+        dashboard_error=dashboard_error,
         wallet_name=os.environ.get("WALLET_NAME"),
         hotkey_name=os.environ.get("HOTKEY_NAME"),
         corpus_fetched_digest=corpus_fetched_digest,

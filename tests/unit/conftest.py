@@ -34,6 +34,7 @@ class FakeMinio:
         self.flaky_get = dict(flaky_get or {})
         self.get_calls: list[str] = []
         self.put_calls: list[str] = []
+        self.acl_calls: list[tuple[str, str]] = []
 
     # ---- minio API surface -------------------------------------------------
     def put_object(self, bucket, key, data, length, content_type=None):
@@ -71,6 +72,11 @@ class FakeMinio:
                 pass
 
         return _Resp()
+
+    def _execute(self, method, bucket, key, *, headers=None, query_params=None):
+        assert method == "PUT"
+        assert query_params == {"acl": ""}
+        self.acl_calls.append((key, (headers or {}).get("x-amz-acl", "")))
 
     # ---- test helpers ------------------------------------------------------
     def seed_raw(self, bucket: str, key: str, raw: bytes) -> None:

@@ -2,6 +2,7 @@
 
 from leoma.infra.commit_parser import validate_repo_name
 from leoma.infra.storage_backend import (
+    create_dashboard_write_client,
     create_own_write_client,
     create_source_read_client,
     create_source_write_client,
@@ -23,6 +24,7 @@ from leoma.infra.corpus import expand_corpus_random
 __all__ = [
     "validate_repo_name",
     "create_own_write_client",
+    "create_dashboard_write_client",
     "create_source_read_client",
     "create_source_write_client",
     "ensure_bucket_exists",

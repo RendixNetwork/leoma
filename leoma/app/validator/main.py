@@ -27,9 +27,14 @@ from leoma.bootstrap import (
     WALLET_NAME,
     HOTKEY_NAME,
     R2_OWN_BUCKET,
+    DASHBOARD_BUCKET,
 )
 from leoma.bootstrap import emit_log as log, emit_header as log_header, log_exception
-from leoma.infra.storage_backend import create_own_write_client, ensure_bucket_exists
+from leoma.infra.storage_backend import (
+    create_dashboard_write_client,
+    create_own_write_client,
+    ensure_bucket_exists,
+)
 from leoma.infra.chain_config import (
     CONSENSUS_DIGEST,
     NAME as CHAIN_NAME,
@@ -40,7 +45,11 @@ from leoma.infra.chain_config import (
 from leoma.eval.codehash import eval_code_digest
 from leoma.eval.errors import ConsensusConfigError
 from leoma.eval.spec import verify_echo
-from leoma.app.validator.reveal_scan import scan_reveals, ChallengerEntry
+from leoma.app.validator.reveal_scan import (
+    ChallengerEntry,
+    decode_scale_revealed_message,
+    scan_reveals,
+)
 from leoma.app.validator.state_store import (
     JsonBucketStore,
     KingState,
@@ -163,6 +172,65 @@ async def refresh_uid_map(subtensor: bt.AsyncSubtensor) -> dict[str, int]:
     meta = await subtensor.metagraph(NETUID)
     hotkeys = list(getattr(meta, "hotkeys", []) or [])
     return {hk: uid for uid, hk in enumerate(hotkeys)}
+
+
+async def _load_revealed_commitments(
+    subtensor: bt.AsyncSubtensor, block: int
+) -> dict[str, tuple[tuple[int, str], ...]]:
+    """Read commitments across Bittensor async-client wire representations.
+
+    The SDK's public helper is preferred.  Bittensor 10.5 paired with newer
+    ``async-substrate-interface`` releases can receive SCALE bytes as a latin-1
+    string, while its decoder assumes hex and raises ``ValueError``.  One legacy
+    commitment then prevents every miner from being scanned.
+
+    Fall back only for decoding/type failures, not network failures.  An
+    undecodable history item is retained as an empty payload so a malformed latest
+    reveal cannot expose (and accidentally re-queue) an older valid reveal.
+    """
+    try:
+        return await subtensor.get_all_revealed_commitments(NETUID, block=block)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        log(
+            "Bittensor commitment decoder rejected raw chain data; "
+            f"using strict compatibility decoder ({type(exc).__name__})",
+            "warn",
+        )
+
+    query = await subtensor.query_map(
+        module="Commitments",
+        name="RevealedCommitments",
+        params=[NETUID],
+        block=block,
+    )
+    result: dict[str, tuple[tuple[int, str], ...]] = {}
+    invalid = 0
+
+    async for hotkey, raw_history in query:
+        history: list[tuple[int, str]] = []
+        history_invalid = False
+        for item in raw_history:
+            try:
+                encoded, reveal_block = item
+                reveal_block = int(reveal_block)
+            except (TypeError, ValueError):
+                history_invalid = True
+                invalid += 1
+                break
+            try:
+                payload = decode_scale_revealed_message(encoded)
+            except ValueError:
+                # Preserve the item's position. scan_reveals deliberately uses the
+                # latest reveal and must not backfill an older valid submission.
+                payload = ""
+                invalid += 1
+            history.append((reveal_block, payload))
+
+        result[str(hotkey)] = () if history_invalid else tuple(history)
+
+    if invalid:
+        log(f"Ignored {invalid} undecodable on-chain commitment item(s)", "warn")
+    return result
 
 
 async def preflight_eval_server(client, eval_server_url: str = EVAL_SERVER_URL) -> None:
@@ -422,9 +490,14 @@ async def maybe_set_weights(
 
     success, message = _unpack_set_weights(result)
     if not success:
-        if _is_rate_limited(message):
+        # Bittensor 10.5's ExtrinsicResponse leaves ``message`` empty when its
+        # internal weight-clock guard makes no attempt. Confirm against the chain
+        # before calling that blank response a failure; a genuine blank failure
+        # still falls through to the normal backoff.
+        if _is_rate_limited(message) or await _chain_says_too_soon(subtensor, wallet):
             # A no-op, not a failure: do NOT advance last_weight_block.
-            log(f"[{current_block}] set_weights rate-limited ({message}); retrying next tick", "warn")
+            detail = message or "chain weight clock says too soon"
+            log(f"[{current_block}] set_weights rate-limited ({detail}); retrying next tick", "warn")
             return False
         return _weight_failed(state, current_block, message)
 
@@ -1083,12 +1156,13 @@ async def tick(
     wallet: bt.Wallet,
     state: KingState,
     store: JsonBucketStore,
+    dashboard_store: Optional[JsonBucketStore] = None,
 ) -> None:
     block = await subtensor.get_current_block()
     uid_map = await refresh_uid_map(subtensor)
     ensure_genesis_king(state, block)
 
-    commits = await subtensor.get_all_revealed_commitments(NETUID, block=block)
+    commits = await _load_revealed_commitments(subtensor, block)
     # Hotkeys with several quarantined artifacts are dropped at scan time — this
     # finally wires reveal_scan's long-dead `blacklist=` hook.
     # Two distinct reasons a hotkey stops being scanned: several unevaluable artifacts
@@ -1107,7 +1181,12 @@ async def tick(
     # hours behind an inline duel: no weights (the chain concludes the validator is
     # dead) and a dashboard frozen on whatever was true when the duel started.
     await maybe_set_weights(subtensor, wallet, state, uid_map, store)
-    await _publish_dashboard(state, uid_map, store, _build_queue(state, entries, uid_map))
+    await _publish_dashboard(
+        state,
+        uid_map,
+        dashboard_store if dashboard_store is not None else store,
+        _build_queue(state, entries, uid_map),
+    )
 
 
 async def main() -> None:
@@ -1131,6 +1210,38 @@ async def main() -> None:
     own_client = create_own_write_client()
     await ensure_bucket_exists(own_client, R2_OWN_BUCKET)
     store = JsonBucketStore(own_client, R2_OWN_BUCKET)
+    dashboard_bucket = DASHBOARD_BUCKET or R2_OWN_BUCKET
+    if not DASHBOARD_BUCKET:
+        log(
+            "LEOMA_DASHBOARD_BUCKET not set; dashboard.json is falling back to the "
+            "private state bucket",
+            "warn",
+        )
+        dashboard_client = own_client
+    elif dashboard_bucket != R2_OWN_BUCKET:
+        try:
+            dashboard_client = create_dashboard_write_client()
+            await ensure_bucket_exists(dashboard_client, dashboard_bucket)
+        except Exception as e:
+            # Public delivery is observability, not consensus. A missing policy or
+            # bucket-scoped credential must never stop chain scanning/weight updates.
+            # Keep the snapshot private until the operator fixes delivery, then switch
+            # to the configured bucket on restart.
+            log(
+                f"Dashboard bucket {dashboard_bucket} unavailable ({e}); falling "
+                f"back to private state bucket {R2_OWN_BUCKET}",
+                "warn",
+            )
+            dashboard_bucket = R2_OWN_BUCKET
+            dashboard_client = own_client
+    else:
+        dashboard_client = own_client
+    dashboard_store = JsonBucketStore(
+        dashboard_client,
+        dashboard_bucket,
+        public_read=dashboard_bucket != R2_OWN_BUCKET,
+    )
+    log(f"Public dashboard bucket: {dashboard_bucket}", "info")
 
     # A validator that cannot read its state must NOT run: on a chain-derived
     # system, running on blank state re-duels every past challenger and re-seeds
@@ -1163,7 +1274,7 @@ async def main() -> None:
 
     while True:
         try:
-            await tick(subtensor, wallet, state, store)
+            await tick(subtensor, wallet, state, store, dashboard_store)
         except (StoreUnavailable, StateInconsistent) as e:
             # Losing the store mid-run means we can no longer persist crowns.
             log(f"State store unavailable: {e}", "critical")

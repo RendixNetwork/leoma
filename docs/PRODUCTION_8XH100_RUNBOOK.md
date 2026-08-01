@@ -46,7 +46,8 @@ and Hippius Hub 0.6.1.
 Create `.env` on the GPU host and never commit it:
 
 ```dotenv
-HIPPIUS_HUB_TOKEN=<model-registry-token>
+# Optional for public miner repositories; set for private genesis access/rate limits.
+HIPPIUS_HUB_TOKEN=
 OBJECT_STORAGE_BACKEND=hippius
 HIPPIUS_ENDPOINT=s3.hippius.com
 HIPPIUS_REGION=decentralized
@@ -161,8 +162,9 @@ Never publish ports 9000-9003 directly to the internet.
 
 ## 8. Validator configuration and preflight
 
-The validator needs its wallet, durable state bucket, Hippius Hub token for config
-prescreen, corpus read credentials, the same Bearer token, and all four URLs:
+The validator needs its wallet, durable state bucket, corpus read credentials, the
+same Bearer token, and all four URLs. A Hippius Hub read token is optional because
+public miner configs are fetched anonymously:
 
 ```dotenv
 NETWORK=finney
@@ -171,7 +173,7 @@ WALLET_NAME=<coldkey-name>
 HOTKEY_NAME=<validator-hotkey-name>
 EVAL_SERVER_URLS=http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003
 LEOMA_EVAL_TOKEN=<same-shared-token>
-HIPPIUS_HUB_TOKEN=<model-registry-token>
+HIPPIUS_HUB_TOKEN=
 OBJECT_STORAGE_BACKEND=hippius
 HIPPIUS_ENDPOINT=s3.hippius.com
 HIPPIUS_REGION=decentralized
@@ -179,6 +181,12 @@ HIPPIUS_SOURCE_BUCKET=leoma-source
 HIPPIUS_VIDEOS_READ_ACCESS_KEY=<read-access-key>
 HIPPIUS_VIDEOS_READ_SECRET_KEY=<read-secret-key>
 R2_OWN_BUCKET=<validator-state-bucket>
+LEOMA_DASHBOARD_BUCKET=<public-dashboard-bucket>
+# Optional when the dashboard bucket has its own S3 credentials:
+# LEOMA_DASHBOARD_ENDPOINT=<dashboard-bucket-s3-endpoint>
+# LEOMA_DASHBOARD_REGION=<dashboard-bucket-region>
+# LEOMA_DASHBOARD_WRITE_ACCESS_KEY=<dashboard-write-access-key>
+# LEOMA_DASHBOARD_WRITE_SECRET_KEY=<dashboard-write-secret-key>
 R2_OWN_ENDPOINT=<state-bucket-s3-endpoint>
 R2_OWN_REGION=<state-bucket-region>
 R2_OWN_WRITE_ACCESS_KEY=<state-write-access-key>

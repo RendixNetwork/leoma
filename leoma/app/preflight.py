@@ -194,6 +194,48 @@ def check_state_bucket(own_bucket: Optional[str]) -> CheckResult:
     )
 
 
+def check_dashboard_bucket(
+    dashboard_bucket: Optional[str],
+    own_bucket: Optional[str],
+    error: Optional[str] = None,
+) -> CheckResult:
+    """Require operators to notice when public delivery still shares private state.
+
+    Dashboard publication is observability, not consensus, so a missing dedicated
+    bucket is a warning rather than a launch-blocking failure. The validator retains
+    the legacy fallback to ``R2_OWN_BUCKET`` but preflight makes that fallback visible.
+    """
+    dashboard = (dashboard_bucket or "").strip()
+    state = (own_bucket or "").strip()
+    if not dashboard:
+        return CheckResult(
+            "dashboard_bucket",
+            WARN,
+            "LEOMA_DASHBOARD_BUCKET is not set — dashboard.json falls back to the "
+            "private state bucket and cannot be exposed independently.",
+        )
+    if dashboard == state:
+        return CheckResult(
+            "dashboard_bucket",
+            WARN,
+            f"dashboard and canonical state both use {dashboard}; use a separate "
+            "public-read bucket before exposing dashboard.json.",
+        )
+    if error:
+        return CheckResult(
+            "dashboard_bucket",
+            WARN,
+            f"public dashboard bucket {dashboard} is configured but not reachable "
+            f"with its write credentials ({error}); the validator will keep running "
+            "and publish only to its private state bucket.",
+        )
+    return CheckResult(
+        "dashboard_bucket",
+        PASS,
+        f"public dashboard publishes separately to {dashboard}",
+    )
+
+
 def check_wallet(wallet_name: Optional[str], hotkey_name: Optional[str]) -> CheckResult:
     if wallet_name and hotkey_name:
         return CheckResult("wallet", PASS, f"{wallet_name}/{hotkey_name}")
@@ -210,6 +252,8 @@ def run_preflight(
     own_bucket: Optional[str],
     wallet_name: Optional[str],
     hotkey_name: Optional[str],
+    dashboard_bucket: Optional[str] = None,
+    dashboard_error: Optional[str] = None,
     corpus_fetched_digest: Optional[str] = None,
     corpus_error: Optional[str] = None,
     eval_servers: tuple[EvalServerProbe, ...] = (),
@@ -228,6 +272,7 @@ def run_preflight(
         check_corpus_reachable(corpus_fetched_digest, manifest_digest, corpus_error),
         *check_eval_servers(eval_servers, consensus_digest, eval_code_digest),
         check_state_bucket(own_bucket),
+        check_dashboard_bucket(dashboard_bucket, own_bucket, dashboard_error),
         check_wallet(wallet_name, hotkey_name),
     ]
     return PreflightReport(tuple(checks))
@@ -238,5 +283,5 @@ __all__ = [
     "CheckResult", "PreflightReport", "EvalServerProbe", "run_preflight",
     "check_seed", "check_corpus_pin", "check_consensus_digest",
     "check_corpus_reachable", "check_eval_server", "check_eval_servers",
-    "check_state_bucket", "check_wallet",
+    "check_state_bucket", "check_dashboard_bucket", "check_wallet",
 ]

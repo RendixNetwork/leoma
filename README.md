@@ -71,6 +71,10 @@ The validator scans reveals, dispatches duels to an eval server, crowns winners,
 - **Bittensor wallet** (coldkey + hotkey) registered as a validator on the subnet.
 - **A reachable eval server** (`EVAL_SERVER_URL`), typically an SSH tunnel to a GPU box.
 - **An own bucket** (`R2_OWN_BUCKET` + `R2_OWN_WRITE_*`) for durable king state.
+- **A separate public-read dashboard bucket** (`LEOMA_DASHBOARD_BUCKET`) defaulting
+  to the same owner endpoint/write credentials. Providers with bucket-scoped keys
+  can use the optional `LEOMA_DASHBOARD_*` overrides. Expose only
+  `dashboard.json`; keep canonical validator state private.
 
 ### Run
 
@@ -89,11 +93,13 @@ Bittensor wallets so the container can sign weight-setting transactions.
 ## Eval server setup
 
 The eval server is the GPU box that downloads and runs miner models. Install the `[eval]` extra
-(torch/diffusers/lpips) and provide Hippius Hub credentials + source-corpus read keys.
+(torch/diffusers/lpips) and provide source-corpus read keys. Public miner repositories are
+downloaded anonymously; Hippius Hub credentials are optional for private genesis repositories or
+registry rate limits.
 
 ```bash
 pip install -e '.[eval]'
-cp env.eval.example .env    # fill in HIPPIUS_HUB_TOKEN, HIPPIUS_VIDEOS_READ_*
+cp env.eval.example .env    # fill in HIPPIUS_VIDEOS_READ_*
 leoma servers eval-server   # FastAPI on EVAL_SERVER_PORT (default 9000)
 ```
 
@@ -143,24 +149,53 @@ rehearsal, and calibration have all passed.
 
 Fine-tune the pinned base architecture (see `chain.toml`), then upload the weights and commit.
 
-### 1. Upload weights to Hippius Hub
+### 1. Create a public Hippius Hub repository
 
-```bash
-leoma miner push --model-dir ./out --repo <user>/leoma-<name>-<your-hotkey-ss58>
+Create the repository in Hippius Hub before the first upload. The repository name must
+**start with `leoma`** and **end with your miner hotkey** (SS58):
+
+```text
+<user-or-project>/leoma-<model-name>-<your-hotkey-ss58>
 ```
 
-The repo name must **start with `leoma`** and **end with your hotkey** (SS58). The command prints the
-immutable `repo@digest` to commit.
+Keep the repository public so validators can download the submitted model without
+knowing your Hub credentials.
 
-### 2. Commit the reveal on-chain
+### 2. Upload weights to Hippius Hub
 
 ```bash
-leoma miner commit --repo <user>/leoma-<name>-<hotkey> --digest sha256:<...> \
+leoma miner push \
+  --model-dir ./out \
+  --repo <user-or-project>/leoma-<model-name>-<your-hotkey-ss58> \
+  --revision submission-001
+```
+
+`--revision` is an optional, mutable upload label such as `submission-001`. If it is
+omitted, Hippius Hub uses `main`; `v1` is not an automatic Leoma default. Reuse the
+same repository with a new revision label for later submissions.
+
+The upload prints an immutable reference:
+
+```text
+<repo>@sha256:<64-hex-digest>
+```
+
+The revision organizes uploads, but it is **not** submitted to validators. The returned
+digest identifies the exact snapshot and cannot silently move when a tag changes.
+
+### 3. Commit the immutable reveal on-chain
+
+```bash
+leoma miner commit --repo <user-or-project>/leoma-<model-name>-<hotkey> --digest sha256:<...> \
   --coldkey <wallet-name> --hotkey <hotkey-name>
 ```
 
-Your wallet must be registered on the subnet. Validators will discover the reveal, duel your model
-against the king, and crown it if it wins.
+Only `repo + digest + hotkey` are written in the `v4` chain reveal. Validators download
+the public model directly as `repo@digest`; they do not need the upload revision or
+your Hippius Hub token.
+
+Your wallet must be registered on the subnet. Validators will discover the reveal,
+duel your model against the king, and crown it if it wins.
 
 ---
 

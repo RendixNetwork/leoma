@@ -67,7 +67,7 @@ HUB_PASSWORD_ENV_NAMES = (
 
 
 class HippiusHubAuthError(RuntimeError):
-    """Raised when Hub/registry auth is unavailable or clearly misconfigured."""
+    """Raised when an authenticated Hub operation has no usable credentials."""
 
 
 def _get_first_env(names: tuple[str, ...]) -> Optional[str]:
@@ -108,6 +108,14 @@ def _s3_auth_detail() -> str:
 
 
 def _resolve_hub_token(action: Optional[str] = None) -> Optional[str]:
+    """Return optional read credentials, or ``None`` for a public repository.
+
+    Miner submissions are public by protocol, so config inspection, OCI copy
+    checks, and snapshot downloads must work anonymously. Operators may still
+    provide a read token to avoid anonymous rate limits or access a private
+    genesis repository. Uploads remain authenticated through
+    :func:`_prepare_upload_token`.
+    """
     token = get_hub_token()
     if token:
         return token
@@ -125,12 +133,8 @@ def _resolve_hub_token(action: Optional[str] = None) -> Optional[str]:
             raise HippiusHubAuthError(f"{action} could not read cached Hippius Hub auth after login.")
         return None
 
-    if action:
-        raise HippiusHubAuthError(
-            f"{action} requires Hippius Hub auth via token {HUB_TOKEN_ENV_NAMES} "
-            f"or username/password envs {HUB_USERNAME_ENV_NAMES} + {HUB_PASSWORD_ENV_NAMES}."
-            f"{_s3_auth_detail()}"
-        )
+    # Public miner repositories are the normal read path. Passing token=None lets
+    # hippius_hub request anonymous pull credentials from the registry.
     return None
 
 

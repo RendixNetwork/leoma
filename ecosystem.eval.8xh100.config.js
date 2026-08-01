@@ -15,7 +15,6 @@ const pairs = [
 ];
 
 const required = [
-  "HIPPIUS_HUB_TOKEN",
   "HIPPIUS_VIDEOS_READ_ACCESS_KEY",
   "HIPPIUS_VIDEOS_READ_SECRET_KEY",
   "LEOMA_EVAL_TOKEN",
@@ -28,7 +27,9 @@ if (missing.length) {
 const shared = {
   EVAL_SERVER_HOST: "127.0.0.1",
   LEOMA_EVAL_TOKEN: process.env.LEOMA_EVAL_TOKEN,
-  HIPPIUS_HUB_TOKEN: process.env.HIPPIUS_HUB_TOKEN,
+  // Optional for public miner repositories; useful for private genesis repos or
+  // avoiding anonymous registry rate limits.
+  HIPPIUS_HUB_TOKEN: process.env.HIPPIUS_HUB_TOKEN || "",
   OBJECT_STORAGE_BACKEND: "hippius",
   HIPPIUS_ENDPOINT: process.env.HIPPIUS_ENDPOINT || "s3.hippius.com",
   HIPPIUS_REGION: process.env.HIPPIUS_REGION || "decentralized",

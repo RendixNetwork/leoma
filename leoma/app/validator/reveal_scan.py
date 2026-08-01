@@ -24,6 +24,74 @@ class ChallengerEntry:
     model_digest: str
 
 
+def decode_scale_revealed_message(encoded: object) -> str:
+    """Decode one SCALE ``Bytes`` commitment from either SDK representation.
+
+    Bittensor 10.5's commitment helper expects the async substrate client to return
+    a hex string.  Newer clients can instead return the same SCALE bytes as a
+    latin-1 ``str`` (one character per byte).  Feeding that value to
+    ``bytes.fromhex`` aborts the *entire* subnet scan when any commitment exists.
+
+    Accept both representations, validate the compact length exactly, and decode
+    UTF-8 strictly.  Callers treat a failure as an invalid reveal; corrupted chain
+    data must never be massaged into a miner submission.
+    """
+    if isinstance(encoded, (bytes, bytearray, memoryview)):
+        raw = bytes(encoded)
+    elif isinstance(encoded, str):
+        body = encoded.removeprefix("0x")
+        looks_hex = bool(body) and len(body) % 2 == 0 and all(
+            char in "0123456789abcdefABCDEF" for char in body
+        )
+        if encoded.startswith("0x") or looks_hex:
+            try:
+                raw = bytes.fromhex(body)
+            except ValueError as exc:
+                raise ValueError("invalid hex commitment") from exc
+        else:
+            try:
+                raw = encoded.encode("latin-1")
+            except UnicodeEncodeError as exc:
+                raise ValueError("commitment is not a byte-preserving string") from exc
+    else:
+        raise ValueError(f"unsupported commitment type: {type(encoded).__name__}")
+
+    if not raw:
+        raise ValueError("empty SCALE commitment")
+
+    mode = raw[0] & 0b11
+    if mode == 0:
+        size = raw[0] >> 2
+        offset = 1
+    elif mode == 1:
+        if len(raw) < 2:
+            raise ValueError("truncated two-byte SCALE length")
+        size = int.from_bytes(raw[:2], "little") >> 2
+        offset = 2
+    elif mode == 2:
+        if len(raw) < 4:
+            raise ValueError("truncated four-byte SCALE length")
+        size = int.from_bytes(raw[:4], "little") >> 2
+        offset = 4
+    else:
+        size_bytes = (raw[0] >> 2) + 4
+        offset = 1 + size_bytes
+        if len(raw) < offset:
+            raise ValueError("truncated big-integer SCALE length")
+        size = int.from_bytes(raw[1:offset], "little")
+
+    end = offset + size
+    if end != len(raw):
+        raise ValueError(
+            f"SCALE commitment length mismatch: declared {size}, "
+            f"available {len(raw) - offset}"
+        )
+    try:
+        return raw[offset:end].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("commitment payload is not valid UTF-8") from exc
+
+
 def scan_reveals(
     commits: Optional[Dict[str, Sequence[Tuple[int, str]]]],
     *,

@@ -5,7 +5,13 @@ Unit tests for the validator's on-chain reveal scan.
 ``get_all_revealed_commitments`` into validated challenger entries.
 """
 
-from leoma.app.validator.reveal_scan import scan_reveals, ChallengerEntry
+import pytest
+
+from leoma.app.validator.reveal_scan import (
+    ChallengerEntry,
+    decode_scale_revealed_message,
+    scan_reveals,
+)
 from leoma.infra.model_store import ModelRef, build_reveal_v4
 
 HK1 = "5C7LM2i42XgL2oB4x3rcmB7KDiof4B92KZzUpg5miZ6DogjU"
@@ -23,6 +29,18 @@ def _reveal(repo: str, digest: str, author: str) -> str:
 def _valid_reveal(hotkey: str, digest: str = SHA) -> str:
     """A well-formed reveal whose repo obeys the leoma-prefix + hotkey-suffix rule."""
     return _reveal(f"user/leoma-m-{hotkey}", digest, hotkey)
+
+
+def _scale_bytes(payload: str) -> bytes:
+    body = payload.encode()
+    size = len(body)
+    if size < 1 << 6:
+        prefix = bytes([size << 2])
+    elif size < 1 << 14:
+        prefix = ((size << 2) | 1).to_bytes(2, "little")
+    else:
+        prefix = ((size << 2) | 2).to_bytes(4, "little")
+    return prefix + body
 
 
 class TestScanReveals:
@@ -88,3 +106,20 @@ class TestScanReveals:
         entries = scan_reveals(commits)
         assert {e.hotkey for e in entries} == {HK1, HK2}
         assert {e.model_digest for e in entries} == {SHA, SHB}
+
+
+class TestCommitmentWireCompatibility:
+    def test_decodes_hex_sdk_representation(self):
+        payload = _valid_reveal(HK1)
+        assert decode_scale_revealed_message("0x" + _scale_bytes(payload).hex()) == payload
+
+    def test_decodes_latin1_async_substrate_representation(self):
+        payload = _valid_reveal(HK1)
+        wire = _scale_bytes(payload).decode("latin-1")
+        assert decode_scale_revealed_message(wire) == payload
+
+    def test_rejects_truncated_or_non_utf8_payloads(self):
+        with pytest.raises(ValueError, match="length mismatch"):
+            decode_scale_revealed_message(bytes([12]) + b"ab")
+        with pytest.raises(ValueError, match="UTF-8"):
+            decode_scale_revealed_message(bytes([4]) + b"\xff")

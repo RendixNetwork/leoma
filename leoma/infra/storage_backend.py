@@ -153,6 +153,23 @@ def create_own_write_client() -> Minio:
     )
 
 
+def create_dashboard_write_client() -> Minio:
+    """Minio client for the public dashboard delivery bucket.
+
+    Most S3 providers can reuse the validator owner's state credentials. Providers
+    that issue bucket-scoped keys can set the optional LEOMA_DASHBOARD_* endpoint,
+    region, and write credential overrides instead.
+    """
+    return _build_minio_client(
+        settings.dashboard_endpoint,
+        settings.dashboard_region,
+        settings.dashboard_write_access_key,
+        settings.dashboard_write_secret_key,
+        purpose="dashboard bucket write access",
+        http_client=_state_pool(),
+    )
+
+
 def create_source_read_client() -> Minio:
     if settings.object_storage_backend == "r2":
         ak, sk = settings.r2_videos_read_access_key, settings.r2_videos_read_secret_key

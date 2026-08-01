@@ -19,7 +19,7 @@ module.exports = {
         EVAL_SERVER_PORT: "9000",
         LEOMA_EVAL_TOKEN: process.env.LEOMA_EVAL_TOKEN || "",
 
-        // Hippius Hub (OCI model registry) auth — token OR username/password.
+        // Optional read auth; public miner repositories download anonymously.
         HIPPIUS_HUB_TOKEN: process.env.HIPPIUS_HUB_TOKEN || "",
         HIPPIUS_HUB_USERNAME: process.env.HIPPIUS_HUB_USERNAME || "",
         HIPPIUS_HUB_PASSWORD: process.env.HIPPIUS_HUB_PASSWORD || "",
