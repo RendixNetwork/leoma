@@ -61,3 +61,39 @@ class TestR2ConfigIsNoLongerBakedIntoTheSource:
     def test_the_source_bucket_is_env_driven(self, monkeypatch):
         rt = _settings(monkeypatch, R2_SOURCE_BUCKET="my-corpus")
         assert rt.settings.r2_source_bucket == "my-corpus"
+
+
+class TestDashboardBucketCredentials:
+    def test_dashboard_defaults_to_state_endpoint_and_credentials(self, monkeypatch):
+        rt = _settings(
+            monkeypatch,
+            R2_OWN_ENDPOINT="s3.owner.example",
+            R2_OWN_REGION="owner-region",
+            R2_OWN_WRITE_ACCESS_KEY="owner-key",
+            R2_OWN_WRITE_SECRET_KEY="owner-secret",
+            LEOMA_DASHBOARD_ENDPOINT="",
+            LEOMA_DASHBOARD_REGION="",
+            LEOMA_DASHBOARD_WRITE_ACCESS_KEY="",
+            LEOMA_DASHBOARD_WRITE_SECRET_KEY="",
+        )
+
+        assert rt.settings.dashboard_endpoint == "s3.owner.example"
+        assert rt.settings.dashboard_region == "owner-region"
+        assert rt.settings.dashboard_write_access_key == "owner-key"
+        assert rt.settings.dashboard_write_secret_key == "owner-secret"
+
+    def test_dashboard_can_use_bucket_scoped_credentials(self, monkeypatch):
+        rt = _settings(
+            monkeypatch,
+            R2_OWN_WRITE_ACCESS_KEY="owner-key",
+            R2_OWN_WRITE_SECRET_KEY="owner-secret",
+            LEOMA_DASHBOARD_ENDPOINT="s3.dashboard.example",
+            LEOMA_DASHBOARD_REGION="dashboard-region",
+            LEOMA_DASHBOARD_WRITE_ACCESS_KEY="dashboard-key",
+            LEOMA_DASHBOARD_WRITE_SECRET_KEY="dashboard-secret",
+        )
+
+        assert rt.settings.dashboard_endpoint == "s3.dashboard.example"
+        assert rt.settings.dashboard_region == "dashboard-region"
+        assert rt.settings.dashboard_write_access_key == "dashboard-key"
+        assert rt.settings.dashboard_write_secret_key == "dashboard-secret"

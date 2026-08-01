@@ -25,6 +25,7 @@ GOOD = dict(
     consensus_digest="sha256:" + "c" * 64,
     eval_code_digest="sha256:" + "e" * 64,
     own_bucket="leoma-state",
+    dashboard_bucket="leoma-dashboard",
     wallet_name="val",
     hotkey_name="hk",
 )
@@ -58,6 +59,29 @@ class TestOverallVerdict:
     def test_a_missing_state_bucket_blocks_launch(self):
         r = run_preflight(**{**GOOD, "own_bucket": None})
         assert not r.ready
+
+    def test_a_separate_dashboard_bucket_passes(self):
+        r = run_preflight(**GOOD)
+        check = next(c for c in r.checks if c.name == "dashboard_bucket")
+        assert check.status == PASS
+
+    def test_dashboard_falling_back_to_state_warns(self):
+        r = run_preflight(**{**GOOD, "dashboard_bucket": None})
+        check = next(c for c in r.checks if c.name == "dashboard_bucket")
+        assert check.status == WARN
+        assert r.ready
+
+    def test_dashboard_sharing_state_warns(self):
+        r = run_preflight(**{**GOOD, "dashboard_bucket": GOOD["own_bucket"]})
+        check = next(c for c in r.checks if c.name == "dashboard_bucket")
+        assert check.status == WARN
+
+    def test_an_unreachable_dashboard_bucket_warns_but_does_not_block_consensus(self):
+        r = run_preflight(**{**GOOD, "dashboard_error": "AccessDenied"})
+        check = next(c for c in r.checks if c.name == "dashboard_bucket")
+        assert check.status == WARN
+        assert "AccessDenied" in check.detail
+        assert r.ready
 
     def test_warnings_do_not_block_launch(self):
         # No eval server configured and no corpus fetch -> warnings only, still ready.

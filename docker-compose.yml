@@ -35,6 +35,11 @@ services:
       R2_OWN_WRITE_SECRET_KEY: ${R2_OWN_WRITE_SECRET_KEY:-}
       R2_OWN_ENDPOINT: ${R2_OWN_ENDPOINT:-}
       R2_OWN_REGION: ${R2_OWN_REGION:-auto}
+      LEOMA_DASHBOARD_BUCKET: ${LEOMA_DASHBOARD_BUCKET:-}
+      LEOMA_DASHBOARD_ENDPOINT: ${LEOMA_DASHBOARD_ENDPOINT:-}
+      LEOMA_DASHBOARD_REGION: ${LEOMA_DASHBOARD_REGION:-}
+      LEOMA_DASHBOARD_WRITE_ACCESS_KEY: ${LEOMA_DASHBOARD_WRITE_ACCESS_KEY:-}
+      LEOMA_DASHBOARD_WRITE_SECRET_KEY: ${LEOMA_DASHBOARD_WRITE_SECRET_KEY:-}
 
   # Eval server: GPU box that downloads king + challenger and runs the duel.
   # Built from Dockerfile.eval (CUDA base + the [eval] extra). The slim validator

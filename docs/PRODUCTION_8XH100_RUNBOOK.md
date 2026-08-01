@@ -181,6 +181,12 @@ HIPPIUS_SOURCE_BUCKET=leoma-source
 HIPPIUS_VIDEOS_READ_ACCESS_KEY=<read-access-key>
 HIPPIUS_VIDEOS_READ_SECRET_KEY=<read-secret-key>
 R2_OWN_BUCKET=<validator-state-bucket>
+LEOMA_DASHBOARD_BUCKET=<public-dashboard-bucket>
+# Optional when the dashboard bucket has its own S3 credentials:
+# LEOMA_DASHBOARD_ENDPOINT=<dashboard-bucket-s3-endpoint>
+# LEOMA_DASHBOARD_REGION=<dashboard-bucket-region>
+# LEOMA_DASHBOARD_WRITE_ACCESS_KEY=<dashboard-write-access-key>
+# LEOMA_DASHBOARD_WRITE_SECRET_KEY=<dashboard-write-secret-key>
 R2_OWN_ENDPOINT=<state-bucket-s3-endpoint>
 R2_OWN_REGION=<state-bucket-region>
 R2_OWN_WRITE_ACCESS_KEY=<state-write-access-key>

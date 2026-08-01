@@ -71,6 +71,10 @@ The validator scans reveals, dispatches duels to an eval server, crowns winners,
 - **Bittensor wallet** (coldkey + hotkey) registered as a validator on the subnet.
 - **A reachable eval server** (`EVAL_SERVER_URL`), typically an SSH tunnel to a GPU box.
 - **An own bucket** (`R2_OWN_BUCKET` + `R2_OWN_WRITE_*`) for durable king state.
+- **A separate public-read dashboard bucket** (`LEOMA_DASHBOARD_BUCKET`) defaulting
+  to the same owner endpoint/write credentials. Providers with bucket-scoped keys
+  can use the optional `LEOMA_DASHBOARD_*` overrides. Expose only
+  `dashboard.json`; keep canonical validator state private.
 
 ### Run
 

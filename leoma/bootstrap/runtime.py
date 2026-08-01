@@ -414,6 +414,26 @@ class Settings:
         self.r2_own_bucket = _read_optional_str("R2_OWN_BUCKET")
         self.r2_own_write_access_key = _read_optional_str("R2_OWN_WRITE_ACCESS_KEY")
         self.r2_own_write_secret_key = _read_optional_str("R2_OWN_WRITE_SECRET_KEY")
+        # Public dashboard delivery is intentionally separated from canonical king
+        # state. Endpoint + write credentials default to this validator owner's state
+        # credentials, while optional LEOMA_DASHBOARD_* overrides support providers
+        # (including bucket-scoped S3 keys) that issue a distinct key per bucket.
+        # Leaving the bucket unset preserves the legacy same-bucket behavior for
+        # existing operators; preflight warns because that layout cannot safely make
+        # the dashboard public without also exposing validator state.
+        self.dashboard_bucket = _read_optional_str("LEOMA_DASHBOARD_BUCKET")
+        self.dashboard_endpoint = (
+            _read_optional_str("LEOMA_DASHBOARD_ENDPOINT") or self.r2_own_endpoint
+        )
+        self.dashboard_region = (
+            _read_optional_str("LEOMA_DASHBOARD_REGION") or self.r2_own_region
+        )
+        self.dashboard_write_access_key = _read_optional_str(
+            "LEOMA_DASHBOARD_WRITE_ACCESS_KEY"
+        ) or self.r2_own_write_access_key
+        self.dashboard_write_secret_key = _read_optional_str(
+            "LEOMA_DASHBOARD_WRITE_SECRET_KEY"
+        ) or self.r2_own_write_secret_key
 
         self.openai_api_key = _read_optional_str("OPENAI_API_KEY")
         self.gemini_api_key = _read_optional_str("GEMINI_API_KEY")
@@ -472,6 +492,7 @@ CORPUS_TARGET_RESOLUTION = settings.corpus_target_resolution
 CORPUS_MAX_FILESIZE = settings.corpus_max_filesize
 SAMPLING_ROTATION_INTERVAL = settings.sampling_rotation_interval
 R2_OWN_BUCKET = settings.r2_own_bucket
+DASHBOARD_BUCKET = settings.dashboard_bucket
 
 # Ensure leoma logger has a handler when not configured by application
 if not logger.handlers:

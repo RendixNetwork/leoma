@@ -27,9 +27,14 @@ from leoma.bootstrap import (
     WALLET_NAME,
     HOTKEY_NAME,
     R2_OWN_BUCKET,
+    DASHBOARD_BUCKET,
 )
 from leoma.bootstrap import emit_log as log, emit_header as log_header, log_exception
-from leoma.infra.storage_backend import create_own_write_client, ensure_bucket_exists
+from leoma.infra.storage_backend import (
+    create_dashboard_write_client,
+    create_own_write_client,
+    ensure_bucket_exists,
+)
 from leoma.infra.chain_config import (
     CONSENSUS_DIGEST,
     NAME as CHAIN_NAME,
@@ -1151,6 +1156,7 @@ async def tick(
     wallet: bt.Wallet,
     state: KingState,
     store: JsonBucketStore,
+    dashboard_store: Optional[JsonBucketStore] = None,
 ) -> None:
     block = await subtensor.get_current_block()
     uid_map = await refresh_uid_map(subtensor)
@@ -1175,7 +1181,12 @@ async def tick(
     # hours behind an inline duel: no weights (the chain concludes the validator is
     # dead) and a dashboard frozen on whatever was true when the duel started.
     await maybe_set_weights(subtensor, wallet, state, uid_map, store)
-    await _publish_dashboard(state, uid_map, store, _build_queue(state, entries, uid_map))
+    await _publish_dashboard(
+        state,
+        uid_map,
+        dashboard_store if dashboard_store is not None else store,
+        _build_queue(state, entries, uid_map),
+    )
 
 
 async def main() -> None:
@@ -1199,6 +1210,38 @@ async def main() -> None:
     own_client = create_own_write_client()
     await ensure_bucket_exists(own_client, R2_OWN_BUCKET)
     store = JsonBucketStore(own_client, R2_OWN_BUCKET)
+    dashboard_bucket = DASHBOARD_BUCKET or R2_OWN_BUCKET
+    if not DASHBOARD_BUCKET:
+        log(
+            "LEOMA_DASHBOARD_BUCKET not set; dashboard.json is falling back to the "
+            "private state bucket",
+            "warn",
+        )
+        dashboard_client = own_client
+    elif dashboard_bucket != R2_OWN_BUCKET:
+        try:
+            dashboard_client = create_dashboard_write_client()
+            await ensure_bucket_exists(dashboard_client, dashboard_bucket)
+        except Exception as e:
+            # Public delivery is observability, not consensus. A missing policy or
+            # bucket-scoped credential must never stop chain scanning/weight updates.
+            # Keep the snapshot private until the operator fixes delivery, then switch
+            # to the configured bucket on restart.
+            log(
+                f"Dashboard bucket {dashboard_bucket} unavailable ({e}); falling "
+                f"back to private state bucket {R2_OWN_BUCKET}",
+                "warn",
+            )
+            dashboard_bucket = R2_OWN_BUCKET
+            dashboard_client = own_client
+    else:
+        dashboard_client = own_client
+    dashboard_store = JsonBucketStore(
+        dashboard_client,
+        dashboard_bucket,
+        public_read=dashboard_bucket != R2_OWN_BUCKET,
+    )
+    log(f"Public dashboard bucket: {dashboard_bucket}", "info")
 
     # A validator that cannot read its state must NOT run: on a chain-derived
     # system, running on blank state re-duels every past challenger and re-seeds
@@ -1231,7 +1274,7 @@ async def main() -> None:
 
     while True:
         try:
-            await tick(subtensor, wallet, state, store)
+            await tick(subtensor, wallet, state, store, dashboard_store)
         except (StoreUnavailable, StateInconsistent) as e:
             # Losing the store mid-run means we can no longer persist crowns.
             log(f"State store unavailable: {e}", "critical")

@@ -102,11 +102,24 @@ class JsonBucketStore:
     failure raises -- that distinction is the whole point of this class.
     """
 
-    def __init__(self, client, bucket: str, *, retries: int = 3, backoff: float = 0.5):
+    def __init__(
+        self,
+        client,
+        bucket: str,
+        *,
+        retries: int = 3,
+        backoff: float = 0.5,
+        public_read: bool = False,
+    ):
         self.client = client
         self.bucket = bucket
         self.retries = max(1, retries)
         self.backoff = backoff
+        # Used only by the dedicated dashboard delivery store. Hippius bucket keys
+        # cannot manage bucket policy, but they can set an object-level public-read
+        # ACL. An S3 overwrite resets that ACL, so it must be re-applied after every
+        # dashboard.json PUT. Canonical state stores always leave this False.
+        self.public_read = public_read
 
     # ---- blocking core (called via to_thread) ----------------------------
     def get_sync(self, key: str) -> Optional[dict]:
@@ -148,6 +161,17 @@ class JsonBucketStore:
                     length=len(payload),
                     content_type="application/json",
                 )
+                if self.public_read:
+                    # minio-py intentionally has no public object-ACL helper. Its
+                    # signed request primitive is the only way to call PutObjectAcl
+                    # without adding a second S3 SDK solely for this one operation.
+                    self.client._execute(
+                        "PUT",
+                        self.bucket,
+                        key,
+                        headers={"x-amz-acl": "public-read"},
+                        query_params={"acl": ""},
+                    )
                 return
             except Exception as e:
                 if attempt < self.retries - 1:

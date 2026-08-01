@@ -76,6 +76,23 @@ class TestJsonBucketStore:
         with pytest.raises(StoreUnavailable):
             await s.put("k.json", {"a": 1})
 
+    async def test_public_delivery_reapplies_object_acl_after_every_put(self):
+        client = FakeMinio()
+        s = JsonBucketStore(client, BUCKET, backoff=0, public_read=True)
+
+        await s.put("dashboard.json", {"version": 1})
+        await s.put("dashboard.json", {"version": 2})
+
+        assert client.acl_calls == [
+            ("dashboard.json", "public-read"),
+            ("dashboard.json", "public-read"),
+        ]
+
+    async def test_private_state_never_sets_a_public_acl(self):
+        s = _store()
+        await s.put(KEY_STATE, {"schema_version": SCHEMA_VERSION})
+        assert s.client.acl_calls == []
+
 
 class TestLoad:
     async def test_empty_bucket_is_a_true_fresh_start(self):

@@ -47,6 +47,13 @@ module.exports = {
         R2_OWN_REGION: process.env.R2_OWN_REGION || "auto",
         R2_OWN_WRITE_ACCESS_KEY: process.env.R2_OWN_WRITE_ACCESS_KEY || "",
         R2_OWN_WRITE_SECRET_KEY: process.env.R2_OWN_WRITE_SECRET_KEY || "",
+        // Public-read delivery bucket. Defaults to the owner endpoint/credentials
+        // above; optional overrides support providers with bucket-scoped keys.
+        LEOMA_DASHBOARD_BUCKET: process.env.LEOMA_DASHBOARD_BUCKET || "",
+        LEOMA_DASHBOARD_ENDPOINT: process.env.LEOMA_DASHBOARD_ENDPOINT || "",
+        LEOMA_DASHBOARD_REGION: process.env.LEOMA_DASHBOARD_REGION || "",
+        LEOMA_DASHBOARD_WRITE_ACCESS_KEY: process.env.LEOMA_DASHBOARD_WRITE_ACCESS_KEY || "",
+        LEOMA_DASHBOARD_WRITE_SECRET_KEY: process.env.LEOMA_DASHBOARD_WRITE_SECRET_KEY || "",
       },
     },
   ],
