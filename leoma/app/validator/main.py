@@ -16,6 +16,7 @@ persists to this validator's own bucket (``state_store``).
 
 import os
 import asyncio
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -44,6 +45,7 @@ from leoma.infra.chain_config import (
 )
 from leoma.eval.codehash import eval_code_digest
 from leoma.eval.errors import ConsensusConfigError
+from leoma.eval.runtime_lock import expected_eval_runtime_digest
 from leoma.eval.spec import verify_echo
 from leoma.app.validator.reveal_scan import (
     ChallengerEntry,
@@ -104,6 +106,14 @@ EVAL_SERVER_URLS: list[str] = _parse_eval_server_urls(
 )
 
 CHALLENGE_POLL_INTERVAL = int(os.environ.get("LEOMA_CHALLENGE_POLL_INTERVAL", "60"))
+
+# Production is the default. The dedicated ``leoma rehearse`` command scopes this
+# ContextVar to False for its entire async task, including crown paths that call
+# maybe_set_weights(force=True). Keeping the interlock here, at the final extrinsic
+# boundary, means a newly-added call site cannot accidentally bypass rehearsal mode.
+_WEIGHT_WRITES_ALLOWED: ContextVar[bool] = ContextVar(
+    "leoma_weight_writes_allowed", default=True
+)
 
 # The pre-dispatch architecture check. On by default: it is the difference between a
 # bad model costing ~5 seconds and costing hours of GPU with the lock held. Off only
@@ -253,11 +263,21 @@ async def preflight_eval_server(client, eval_server_url: str = EVAL_SERVER_URL) 
             reason="consensus_mismatch",
         )
     their_code = health.get("eval_code_digest")
-    if their_code and their_code != eval_code_digest():
+    if their_code != eval_code_digest():
         raise EvalJobFailed(
             f"eval server {eval_server_url} runs different scoring code (box {their_code}, "
             f"validator {eval_code_digest()}). Its distances would not be reproducible.",
             reason="code_mismatch",
+        )
+    expected_runtime = expected_eval_runtime_digest(SPEC.runtime)
+    their_runtime = health.get("eval_runtime_digest")
+    if health.get("eval_runtime_compatible") is not True or their_runtime != expected_runtime:
+        issues = health.get("eval_runtime_issues") or []
+        detail = f" Issues: {'; '.join(str(item) for item in issues[:5])}" if issues else ""
+        raise EvalJobFailed(
+            f"eval server {eval_server_url} runs a different numerical runtime (box "
+            f"{their_runtime}, validator expects {expected_runtime}).{detail}",
+            reason="runtime_mismatch",
         )
 
 
@@ -388,6 +408,19 @@ def _verified_verdict(verdict: Optional[dict]) -> dict:
         verify_echo(SPEC, verdict.get("echo"))
     except ConsensusConfigError as e:
         raise EvalJobFailed(str(e), reason="consensus_echo_mismatch") from e
+    audit = verdict.get("audit") or {}
+    if audit.get("eval_code_digest") != eval_code_digest():
+        raise EvalJobFailed(
+            "eval verdict did not prove the expected scoring-code digest",
+            reason="code_mismatch",
+        )
+    runtime = audit.get("eval_runtime") or {}
+    expected_runtime = expected_eval_runtime_digest(SPEC.runtime)
+    if runtime.get("compatible") is not True or runtime.get("digest") != expected_runtime:
+        raise EvalJobFailed(
+            "eval verdict did not prove the expected numerical-runtime digest",
+            reason="runtime_mismatch",
+        )
     return verdict
 
 
@@ -464,6 +497,17 @@ async def maybe_set_weights(
     misreporting the state. We now only advance on a real success.
     """
     current_block = await subtensor.get_current_block()
+
+    if not _WEIGHT_WRITES_ALLOWED.get():
+        uids, weights, label = K.weight_targets(
+            state.king, state.king_chain, uid_map, burn_uid=K.BURN_UID
+        )
+        log(
+            f"[{current_block}] REHEARSAL: would set_weights -> {label}: "
+            f"uids={uids} weights={[round(w, 4) for w in weights]}; extrinsic suppressed",
+            "warn",
+        )
+        return False
 
     if not force:
         if current_block < state.next_weight_block:
@@ -1181,6 +1225,11 @@ async def tick(
     # hours behind an inline duel: no weights (the chain concludes the validator is
     # dead) and a dashboard frozen on whatever was true when the duel started.
     await maybe_set_weights(subtensor, wallet, state, uid_map, store)
+    # Weight submission is not the persistence boundary. It can be suppressed in a
+    # rehearsal, rate-limited by the chain, or fail transiently; genesis seeding and
+    # any other dirty state must still survive a restart. ``flush`` is a cheap no-op
+    # when a crown or successful weight write already persisted the current state.
+    await state.flush(store)
     await _publish_dashboard(
         state,
         uid_map,
@@ -1189,13 +1238,33 @@ async def tick(
     )
 
 
-async def main() -> None:
-    """Run the king-of-the-hill validator loop."""
+async def _run_validator(
+    *,
+    rehearsal: bool = False,
+    max_ticks: Optional[int] = None,
+    state_bucket: Optional[str] = None,
+    state_prefix: Optional[str] = None,
+) -> None:
+    """Run the validator loop after the weight-write interlock is installed."""
     log_header("Leoma Validator Starting (king of the hill)")
 
-    if not R2_OWN_BUCKET:
-        log("R2_OWN_BUCKET not set; validator disabled (cannot persist king state)", "error")
+    own_bucket = (state_bucket or R2_OWN_BUCKET or "").strip()
+    if not own_bucket:
+        log("Validator state bucket not set; validator disabled (cannot persist king state)", "error")
         return
+    if rehearsal:
+        if not state_bucket:
+            raise ValueError("rehearsal requires an explicit state_bucket")
+        if R2_OWN_BUCKET and own_bucket == R2_OWN_BUCKET:
+            raise ValueError("rehearsal state bucket must differ from the validator state bucket")
+        clean_prefix = (state_prefix or "").strip("/")
+        if not clean_prefix.startswith("rehearsals/") or ".." in clean_prefix.split("/"):
+            raise ValueError("rehearsal state_prefix must start with 'rehearsals/'")
+        log(
+            "REHEARSAL MODE: live reads/evaluations are enabled; every set_weights "
+            "extrinsic is structurally suppressed",
+            "warn",
+        )
 
     subtensor = bt.AsyncSubtensor(network=NETWORK)
     wallet = bt.Wallet(name=WALLET_NAME, hotkey=HOTKEY_NAME)
@@ -1208,17 +1277,23 @@ async def main() -> None:
     log(f"Consensus digest: {CONSENSUS_DIGEST}  (eval code: {eval_code_digest()})", "info")
 
     own_client = create_own_write_client()
-    await ensure_bucket_exists(own_client, R2_OWN_BUCKET)
-    store = JsonBucketStore(own_client, R2_OWN_BUCKET)
-    dashboard_bucket = DASHBOARD_BUCKET or R2_OWN_BUCKET
-    if not DASHBOARD_BUCKET:
+    await ensure_bucket_exists(own_client, own_bucket)
+    store = JsonBucketStore(
+        own_client,
+        own_bucket,
+        key_prefix=(state_prefix or "") if rehearsal else "",
+    )
+    # A rehearsal never publishes into the configured production dashboard bucket.
+    # Its state and dashboard stay together in the explicitly separate test bucket.
+    configured_dashboard_bucket = None if rehearsal else DASHBOARD_BUCKET
+    dashboard_bucket = configured_dashboard_bucket or own_bucket
+    if not configured_dashboard_bucket:
         log(
-            "LEOMA_DASHBOARD_BUCKET not set; dashboard.json is falling back to the "
-            "private state bucket",
+            "dashboard.json is using the validator state bucket",
             "warn",
         )
         dashboard_client = own_client
-    elif dashboard_bucket != R2_OWN_BUCKET:
+    elif dashboard_bucket != own_bucket:
         try:
             dashboard_client = create_dashboard_write_client()
             await ensure_bucket_exists(dashboard_client, dashboard_bucket)
@@ -1229,19 +1304,27 @@ async def main() -> None:
             # to the configured bucket on restart.
             log(
                 f"Dashboard bucket {dashboard_bucket} unavailable ({e}); falling "
-                f"back to private state bucket {R2_OWN_BUCKET}",
+                f"back to private state bucket {own_bucket}",
                 "warn",
             )
-            dashboard_bucket = R2_OWN_BUCKET
+            dashboard_bucket = own_bucket
             dashboard_client = own_client
     else:
         dashboard_client = own_client
     dashboard_store = JsonBucketStore(
         dashboard_client,
         dashboard_bucket,
-        public_read=dashboard_bucket != R2_OWN_BUCKET,
+        public_read=dashboard_bucket != own_bucket,
+        key_prefix=(state_prefix or "") if rehearsal else "",
     )
-    log(f"Public dashboard bucket: {dashboard_bucket}", "info")
+    if rehearsal:
+        log(
+            f"Rehearsal state/dashboard namespace: "
+            f"s3://{dashboard_bucket}/{state_prefix.strip('/')}/",
+            "info",
+        )
+    else:
+        log(f"Public dashboard bucket: {dashboard_bucket}", "info")
 
     # A validator that cannot read its state must NOT run: on a chain-derived
     # system, running on blank state re-duels every past challenger and re-seeds
@@ -1272,7 +1355,8 @@ async def main() -> None:
     except Exception as e:
         log(f"Startup weight-set failed (will retry on the first tick): {e}", "warn")
 
-    while True:
+    ticks = 0
+    while max_ticks is None or ticks < max_ticks:
         try:
             await tick(subtensor, wallet, state, store, dashboard_store)
         except (StoreUnavailable, StateInconsistent) as e:
@@ -1283,7 +1367,39 @@ async def main() -> None:
         except Exception as e:
             log(f"Validator tick error: {e}", "error")
             log_exception("Validator tick error", e)
+        ticks += 1
+        if max_ticks is not None and ticks >= max_ticks:
+            mode = "Rehearsal" if rehearsal else "Bounded validator run"
+            log(f"{mode} completed after {ticks} validator tick(s)", "success")
+            break
         await asyncio.sleep(CHALLENGE_POLL_INTERVAL)
+
+
+async def main(
+    *,
+    rehearsal: bool = False,
+    max_ticks: Optional[int] = None,
+    state_bucket: Optional[str] = None,
+    state_prefix: Optional[str] = None,
+) -> None:
+    """Run production indefinitely, or a bounded no-extrinsic rehearsal.
+
+    Rehearsal mode is deliberately a function argument rather than an environment
+    toggle accepted by the normal ``serve`` command. It requires a distinct state
+    bucket and a finite tick count; the CLI enforces both before calling this API.
+    """
+    if rehearsal and (max_ticks is None or max_ticks < 1):
+        raise ValueError("rehearsal requires max_ticks >= 1")
+    token = _WEIGHT_WRITES_ALLOWED.set(not rehearsal)
+    try:
+        await _run_validator(
+            rehearsal=rehearsal,
+            max_ticks=max_ticks,
+            state_bucket=state_bucket,
+            state_prefix=state_prefix,
+        )
+    finally:
+        _WEIGHT_WRITES_ALLOWED.reset(token)
 
 
 def main_sync() -> None:

@@ -53,16 +53,19 @@ leoma calibrate analyze box-*.json
 
 ## 2. Preflight — the launch gate
 
-On the validator box, with `EVAL_SERVER_URL`, `R2_OWN_BUCKET`,
+On the validator box, with `EVAL_SERVER_URL`, `HIPPIUS_OWN_BUCKET` (or the legacy
+`R2_OWN_BUCKET` alias),
 `LEOMA_DASHBOARD_BUCKET`, `WALLET_NAME`, and `HOTKEY_NAME` set:
 
 ```bash
 leoma preflight
 ```
 
-It exits non-zero (and says exactly why) if the seed or corpus is unpinned, the
-consensus surface is invalid, or the eval box is on a different `chain.toml` / scoring
-code than the validator. **Gate your launch script on it:**
+It exits non-zero (and says exactly why) if the seed or corpus is unpinned or
+unreachable, the wallet does not exist, the hotkey is not registered/permitted on
+the configured subnet, or any eval box is unreachable or uses different
+`chain.toml`, scoring code, uv lock, numerical packages, CUDA, or GPU capability.
+**Gate your launch script on it:**
 
 ```bash
 leoma preflight && leoma serve

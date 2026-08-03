@@ -70,7 +70,9 @@ The validator scans reveals, dispatches duels to an eval server, crowns winners,
 
 - **Bittensor wallet** (coldkey + hotkey) registered as a validator on the subnet.
 - **A reachable eval server** (`EVAL_SERVER_URL`), typically an SSH tunnel to a GPU box.
-- **An own bucket** (`R2_OWN_BUCKET` + `R2_OWN_WRITE_*`) for durable king state.
+- **A private Hippius state bucket** (`HIPPIUS_OWN_BUCKET` +
+  `HIPPIUS_OWN_WRITE_*`) for durable king state. Legacy `R2_OWN_*` aliases remain
+  supported.
 - **A separate public-read dashboard bucket** (`LEOMA_DASHBOARD_BUCKET`) defaulting
   to the same owner endpoint/write credentials. Providers with bucket-scoped keys
   can use the optional `LEOMA_DASHBOARD_*` overrides. Expose only
@@ -81,12 +83,16 @@ The validator scans reveals, dispatches duels to an eval server, crowns winners,
 ```bash
 # Requires Python 3.12+
 pip install -e .            # or: uv pip install -e .
-cp env.validator.example .env   # fill in wallet, EVAL_SERVER_URL, R2_OWN_*
+cp env.validator.example .env   # fill in wallet, EVAL_SERVER_URL, HIPPIUS_OWN_*
 leoma serve                 # scan reveals -> duel -> crown -> set weights
 ```
 
-Or with Docker: `cp env.validator.example .env && docker compose up -d validator`. Mount your
-Bittensor wallets so the container can sign weight-setting transactions.
+For a local image build, use
+`cp env.validator.example .env && docker compose up -d validator`. Production is
+pull-only and digest-addressed: set `LEOMA_VALIDATOR_IMAGE_DIGEST` and
+`BITTENSOR_WALLETS_DIR`, then run
+`docker compose -f docker-compose.validator.production.yml up -d`. A mutable tag
+cannot be supplied to that production file.
 
 ---
 
@@ -98,13 +104,26 @@ downloaded anonymously; Hippius Hub credentials are optional for private genesis
 registry rate limits.
 
 ```bash
-pip install -e '.[eval]'
+uv sync --frozen --extra eval --no-dev
 cp env.eval.example .env    # fill in HIPPIUS_VIDEOS_READ_*
-leoma servers eval-server   # FastAPI on EVAL_SERVER_PORT (default 9000)
+uv run leoma servers eval-server   # FastAPI on EVAL_SERVER_PORT (default 9000)
 ```
 
 The validator reaches it over `EVAL_SERVER_URL` (default `http://localhost:9000`, usually an SSH
 tunnel). One duel runs at a time. See `ecosystem.eval.config.js` for a PM2 launcher.
+The evaluator refuses jobs unless its Python, CUDA, H100 capability, uv lock, and
+installed generation/scoring packages match the runtime pinned in `chain.toml`.
+The production 8xH100 layout runs four digest-pinned containers from
+`docker-compose.eval.8xh100.production.yml`, one isolated process per GPU pair.
+See `docs/PRODUCTION_8XH100_RUNBOOK.md` for image publication and rollout.
+
+For a live-chain rehearsal on a non-production validator host, run
+`leoma rehearse --ticks N --state-bucket <test-bucket> --state-prefix
+rehearsals/<run-id>`. It exercises
+the real reveal, evaluator, verdict, persistence, and dashboard paths while the
+central weight boundary suppresses every `set_weights` extrinsic. The rehearsal
+bucket must differ from the configured validator state bucket, and the process exits
+after `N` ticks.
 
 Before a new eval box is allowed to duel, prove it decodes the pinned corpus byte-identically:
 

@@ -136,6 +136,21 @@ class DeterminismSpec(_Pinned):
     allow_tf32: bool
 
 
+class EvalRuntimeSpec(_Pinned):
+    """The execution environment allowed to produce consensus verdicts.
+
+    Source-code equality is insufficient for diffusion inference: changing Torch,
+    Diffusers, CUDA, Python, or the GPU architecture can change generated frames.
+    The complete dependency resolution is anchored by ``eval_lock_digest`` while
+    the remaining fields pin the hardware/runtime axes that do not live in uv.lock.
+    """
+
+    python: str = Field(pattern=r"^\d+\.\d+$")
+    cuda: str = Field(pattern=r"^\d+\.\d+$")
+    compute_capability: str = Field(pattern=r"^\d+\.\d+$")
+    eval_lock_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class ConsensusSpec(_Pinned):
     """Everything that can change a verdict — and nothing that can't."""
 
@@ -144,6 +159,7 @@ class ConsensusSpec(_Pinned):
     duel: DuelSpec
     arch: ArchSpec
     determinism: DeterminismSpec
+    runtime: EvalRuntimeSpec
 
     def digest(self) -> str:
         """The one hash that says "we are running the same exam"."""
@@ -223,6 +239,7 @@ __all__ = [
     "CorpusSpec",
     "DeterminismSpec",
     "DuelSpec",
+    "EvalRuntimeSpec",
     "GenSpec",
     "verify_echo",
 ]

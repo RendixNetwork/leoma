@@ -416,7 +416,16 @@ def load_video_pipeline(snapshot_dir: str, *, gen, device: Optional[str] = None,
         dtype = torch.float32  # CPU has no usable bf16 path; tests only
 
     target_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    pipe = pipeline_cls.from_pretrained(snapshot_dir, torch_dtype=dtype)
+    # Miner snapshots are untrusted. model_store enforces a safetensors/config-only
+    # filesystem allowlist, and these explicit flags prevent a future loader default
+    # from re-enabling network fetches, pickle weights, or repository code.
+    pipe = pipeline_cls.from_pretrained(
+        snapshot_dir,
+        torch_dtype=dtype,
+        local_files_only=True,
+        trust_remote_code=False,
+        use_safetensors=True,
+    )
     pipe = _place_pipeline(pipe, offload=gen.offload, device=target_device)
 
     if cache_key:

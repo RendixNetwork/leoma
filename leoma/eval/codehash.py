@@ -35,6 +35,7 @@ SCORED_MODULES = (
     "eval/spec.py",
     "eval/digests.py",
     "eval/determinism.py",
+    "eval/runtime_lock.py",
     "eval_server.py",
     "app/validator/prescreen.py",
     "infra/model_store.py",

@@ -19,14 +19,14 @@ dependencies = [
     "numpy",
     "openai>=1.0.0,<2",
     "google-genai>=0.3.0",
-    "click",
+    "click>=8.3.3,<9",
     "pydantic>=2.0.0,<3",
-    "yt-dlp",
+    "yt-dlp>=2026.7.4",
     # Eval server HTTP (validator dispatches duels here)
-    "fastapi>=0.109.0,<0.116.0",
+    "fastapi>=0.141.1,<0.142.0",
     "uvicorn[standard]>=0.27.0",
     "httpx",
-    "pillow",
+    "pillow>=12.3.0,<13",
 ]
 
 [project.optional-dependencies]
@@ -74,8 +74,26 @@ include = ["leoma*"]
 [tool.setuptools.package-data]
 leoma = ["chain.toml"]
 
+[tool.uv]
+# Security floors for dependencies brought in by Bittensor and the HTTP clients.
+# They are constraints, not direct imports; uv.lock remains the deployment source
+# of truth and prevents a rebuild from resolving a different transitive graph.
+constraint-dependencies = [
+    "cryptography>=48.0.1",
+    "idna>=3.15",
+    "msgpack>=1.2.1",
+    "pyasn1>=0.6.4",
+    "pygments>=2.20.0",
+    "setuptools>=83.0.0",
+    # Keep the ASGI layer on the audited 1.3 line. FastAPI intentionally exposes a
+    # broad Starlette floor, so this ceiling prevents an unreviewed future major/minor
+    # from changing the evaluator's HTTP/SSE behavior during a lock refresh.
+    "starlette>=1.3.1,<1.4",
+    "urllib3>=2.7.0",
+]
+
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]

@@ -16,9 +16,12 @@ import json
 import os
 import re
 import shutil
+from fnmatch import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
+
+from leoma.eval.errors import ChallengerFault
 
 MODEL_CACHE_DIR = os.environ.get("LEOMA_MODEL_CACHE_DIR", "/tmp/leoma/hippius_models")
 HUB_TOKEN_PATH = Path("~/.cache/hippius/hub/token").expanduser()
@@ -68,6 +71,12 @@ HUB_PASSWORD_ENV_NAMES = (
 
 class HippiusHubAuthError(RuntimeError):
     """Raised when an authenticated Hub operation has no usable credentials."""
+
+
+class UnsafeSnapshotError(ChallengerFault):
+    """A downloaded model contains executable or otherwise forbidden files."""
+
+    reason = "unsafe_snapshot"
 
 
 def _get_first_env(names: tuple[str, ...]) -> Optional[str]:
@@ -308,6 +317,47 @@ def _mark_complete(target: Path, ref: ModelRef) -> None:
     _marker_path(target).write_text(json.dumps(payload, indent=2))
 
 
+def validate_snapshot_files(
+    target: str | os.PathLike[str], *, require_weights: bool = True
+) -> None:
+    """Reject executable files, links, and non-safetensors model weights.
+
+    Miner repositories are untrusted input. Diffusers versions before 0.38 have
+    known remote-code guard bypasses, so the evaluator does not rely on that guard
+    alone: the registry download allowlist is enforced again on disk before every
+    load. A poisoned local cache therefore cannot add ``.py``/pickle files after the
+    original download and become executable on the next duel.
+    """
+    root = Path(target)
+    if not root.is_dir() or root.is_symlink():
+        raise UnsafeSnapshotError(f"model snapshot is not a real directory: {root}")
+
+    found_weights = False
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        for name in dirnames:
+            path = directory_path / name
+            if path.is_symlink():
+                raise UnsafeSnapshotError(f"model snapshot contains a directory symlink: {path}")
+        for name in filenames:
+            path = directory_path / name
+            if path.is_symlink() or not path.is_file():
+                raise UnsafeSnapshotError(f"model snapshot contains a non-regular file: {path}")
+            if name == COMPLETION_MARKER:
+                continue
+            if not any(fnmatch(name, pattern) for pattern in ALLOW_PATTERNS):
+                relative = path.relative_to(root).as_posix()
+                raise UnsafeSnapshotError(
+                    f"model snapshot contains forbidden file {relative!r}; only configs, "
+                    "tokenizer data, and .safetensors weights are accepted"
+                )
+            if fnmatch(name, "*.safetensors"):
+                found_weights = True
+
+    if require_weights and not found_weights:
+        raise UnsafeSnapshotError("model snapshot contains no .safetensors weights")
+
+
 def _cached_snapshots(root: Path) -> list[tuple[float, Path]]:
     """Completed snapshots on disk, oldest use first. Incomplete ones are junk."""
     found: list[tuple[float, Path]] = []
@@ -370,6 +420,7 @@ def materialize_model(ref: ModelRef, local_dir: Optional[str] = None, max_worker
         target = Path(local_dir) if local_dir else _cache_snapshot_path(ref)
 
     if is_complete(target):
+        validate_snapshot_files(target, require_weights=not config_only)
         return str(target)
 
     # Not complete: either absent, or the debris of an interrupted download. Either
@@ -385,8 +436,14 @@ def materialize_model(ref: ModelRef, local_dir: Optional[str] = None, max_worker
     target.parent.mkdir(parents=True, exist_ok=True)
     patterns = CONFIG_ONLY_PATTERNS if config_only else ALLOW_PATTERNS
     result = _call_snapshot_download(ref, str(target), max_workers, allow_patterns=patterns)
+    result_path = Path(result)
+    if result_path.resolve() != target.resolve():
+        raise UnsafeSnapshotError(
+            f"registry returned snapshot outside the requested cache path: {result_path}"
+        )
 
-    _mark_complete(Path(result), ref)
+    validate_snapshot_files(result_path, require_weights=not config_only)
+    _mark_complete(result_path, ref)
     return result
 
 

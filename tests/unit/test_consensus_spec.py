@@ -11,7 +11,15 @@ from pydantic import ValidationError
 
 from leoma.eval.digests import canonical_json, digest_obj
 from leoma.eval.errors import ConsensusConfigError
-from leoma.eval.spec import ArchSpec, ConsensusSpec, CorpusSpec, DuelSpec, GenSpec, verify_echo
+from leoma.eval.spec import (
+    ArchSpec,
+    ConsensusSpec,
+    CorpusSpec,
+    DuelSpec,
+    EvalRuntimeSpec,
+    GenSpec,
+    verify_echo,
+)
 
 from .conftest import pinned_spec
 
@@ -52,6 +60,16 @@ class TestNoDefaults:
         with pytest.raises(ValidationError):
             ArchSpec(**fields)
 
+    @pytest.mark.parametrize(
+        "missing", ["python", "cuda", "compute_capability", "eval_lock_digest"]
+    )
+    def test_a_missing_runtime_field_raises(self, missing):
+        spec = pinned_spec()
+        fields = spec.runtime.model_dump()
+        fields.pop(missing)
+        with pytest.raises(ValidationError):
+            EvalRuntimeSpec(**fields)
+
 
 class TestDigest:
     def test_same_spec_same_digest(self):
@@ -69,6 +87,17 @@ class TestDigest:
         replacement = "sha256:" + "a" * 64
         moved = base.model_copy(
             update={"arch": base.arch.model_copy(update={"base_digest": replacement})}
+        )
+        assert moved.digest() != base.digest()
+
+    def test_runtime_lock_changes_the_consensus_digest(self):
+        base = pinned_spec()
+        moved = base.model_copy(
+            update={
+                "runtime": base.runtime.model_copy(
+                    update={"eval_lock_digest": "sha256:" + "f" * 64}
+                )
+            }
         )
         assert moved.digest() != base.digest()
 

@@ -18,7 +18,7 @@ module.exports = {
         // until process exit. Production health must be observable in real time.
         PYTHONUNBUFFERED: process.env.PYTHONUNBUFFERED || "1",
         NETWORK: process.env.NETWORK || "finney",
-        NETUID: process.env.NETUID || "99",
+        NETUID: process.env.NETUID || "36",
         WALLET_NAME: process.env.WALLET_NAME || "default",
         HOTKEY_NAME: process.env.HOTKEY_NAME || "default",
 

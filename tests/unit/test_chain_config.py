@@ -41,6 +41,13 @@ class TestPackagedLocation:
         assert chain_config.SEED_REPO == chain_config.ARCH_BASE_REPO
         assert chain_config.SEED_REPO_BACKEND == "hippius"
 
+    def test_eval_runtime_is_pinned_to_the_h100_lock(self):
+        runtime = chain_config.SPEC.runtime
+        assert runtime.python == "3.12"
+        assert runtime.cuda == "12.4"
+        assert runtime.compute_capability == "9.0"
+        assert runtime.eval_lock_digest.startswith("sha256:")
+
 
 class TestOverride:
     def test_override_absolute_path(self, tmp_path, monkeypatch):

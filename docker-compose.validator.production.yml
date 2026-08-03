@@ -1,0 +1,50 @@
+# Leoma production validator (run on the validator host).
+#
+# The image is pull-only and addressed by registry digest. Set the variable to the
+# raw `sha256:<64 hex>` manifest digest; a mutable image tag cannot be supplied.
+services:
+  validator:
+    image: rendixnetwork/leoma@${LEOMA_VALIDATOR_IMAGE_DIGEST:?set LEOMA_VALIDATOR_IMAGE_DIGEST to sha256:<64hex>}
+    pull_policy: always
+    container_name: leoma-validator
+    restart: unless-stopped
+    command: leoma serve
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      NETWORK: ${NETWORK:-finney}
+      NETUID: ${NETUID:-36}
+      LEOMA_TESTNET_SUBNET_NAME: ${LEOMA_TESTNET_SUBNET_NAME:-}
+      WALLET_NAME: ${WALLET_NAME:-default}
+      HOTKEY_NAME: ${HOTKEY_NAME:-default}
+      EVAL_SERVER_URL: ${EVAL_SERVER_URL:-http://127.0.0.1:9000}
+      EVAL_SERVER_URLS: ${EVAL_SERVER_URLS:-}
+      LEOMA_EVAL_TOKEN: ${LEOMA_EVAL_TOKEN:?set LEOMA_EVAL_TOKEN in .env}
+      OBJECT_STORAGE_BACKEND: ${OBJECT_STORAGE_BACKEND:-hippius}
+      HIPPIUS_HUB_TOKEN: ${HIPPIUS_HUB_TOKEN:-}
+      HIPPIUS_ENDPOINT: ${HIPPIUS_ENDPOINT:-s3.hippius.com}
+      HIPPIUS_REGION: ${HIPPIUS_REGION:-decentralized}
+      HIPPIUS_SOURCE_BUCKET: ${HIPPIUS_SOURCE_BUCKET:-leoma-source}
+      HIPPIUS_VIDEOS_READ_ACCESS_KEY: ${HIPPIUS_VIDEOS_READ_ACCESS_KEY:-}
+      HIPPIUS_VIDEOS_READ_SECRET_KEY: ${HIPPIUS_VIDEOS_READ_SECRET_KEY:-}
+      HIPPIUS_OWN_BUCKET: ${HIPPIUS_OWN_BUCKET:-}
+      HIPPIUS_OWN_WRITE_ACCESS_KEY: ${HIPPIUS_OWN_WRITE_ACCESS_KEY:-}
+      HIPPIUS_OWN_WRITE_SECRET_KEY: ${HIPPIUS_OWN_WRITE_SECRET_KEY:-}
+      HIPPIUS_OWN_ENDPOINT: ${HIPPIUS_OWN_ENDPOINT:-}
+      HIPPIUS_OWN_REGION: ${HIPPIUS_OWN_REGION:-decentralized}
+      # Legacy Cloudflare R2 aliases.
+      R2_OWN_BUCKET: ${R2_OWN_BUCKET:-}
+      R2_OWN_WRITE_ACCESS_KEY: ${R2_OWN_WRITE_ACCESS_KEY:-}
+      R2_OWN_WRITE_SECRET_KEY: ${R2_OWN_WRITE_SECRET_KEY:-}
+      R2_OWN_ENDPOINT: ${R2_OWN_ENDPOINT:-}
+      R2_OWN_REGION: ${R2_OWN_REGION:-auto}
+      LEOMA_DASHBOARD_BUCKET: ${LEOMA_DASHBOARD_BUCKET:-}
+      LEOMA_DASHBOARD_ENDPOINT: ${LEOMA_DASHBOARD_ENDPOINT:-}
+      LEOMA_DASHBOARD_REGION: ${LEOMA_DASHBOARD_REGION:-}
+      LEOMA_DASHBOARD_WRITE_ACCESS_KEY: ${LEOMA_DASHBOARD_WRITE_ACCESS_KEY:-}
+      LEOMA_DASHBOARD_WRITE_SECRET_KEY: ${LEOMA_DASHBOARD_WRITE_SECRET_KEY:-}
+    volumes:
+      # Preflight reads the real hotkey and coldkeypub. Never bake wallet files
+      # into an image or make the host wallet writable by the container.
+      - ${BITTENSOR_WALLETS_DIR:?set BITTENSOR_WALLETS_DIR to the host wallets directory}:/root/.bittensor/wallets:ro

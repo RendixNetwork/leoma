@@ -269,6 +269,9 @@ class _Job:
 
 def create_app(runner: Optional[Runner] = None) -> FastAPI:
     app = FastAPI(title="leoma-eval-server")
+    # Supplying a runner is the explicit unit-test/in-process injection seam. Only
+    # the real production runner requires CUDA and the pinned eval dependency graph.
+    enforce_runtime = runner is None
     run_job: Runner = runner or run_eval_job
 
     @app.middleware("http")
@@ -369,29 +372,51 @@ def create_app(runner: Optional[Runner] = None) -> FastAPI:
     def health() -> dict:
         """Enough for a validator to reject a stale box *before* handing it a duel.
 
-        ``consensus_digest`` and ``eval_code_digest`` are the two that matter: a box
-        whose chain.toml or scoring code has drifted will produce distances nobody can
-        reproduce, and an hours-long duel is a very expensive way to find that out.
+        Source/config digests are necessary but not sufficient: the numerical
+        runtime (Torch, Diffusers, CUDA, GPU capability, and uv.lock) is enforced too.
         """
-        from leoma.infra.chain_config import CONSENSUS_DIGEST
+        from leoma.infra.chain_config import CONSENSUS_DIGEST, SPEC
         from leoma.eval.codehash import eval_code_digest
+        from leoma.eval.runtime_lock import eval_runtime_report
 
         with lock_guard:
             busy_with = lock_holder["eval_id"]
         job = jobs.get(busy_with) if busy_with else None
+        runtime = eval_runtime_report(SPEC.runtime)
+        runtime_ok = bool(runtime["compatible"] or not enforce_runtime)
 
         return {
-            "status": "ok",
+            "status": "ok" if runtime_ok else "runtime_mismatch",
             "busy": busy_with is not None,
             "eval_id": busy_with,
             "phase": job.phase if job else None,
             "stalled_for": round(job.stalled_for(), 1) if job else None,
             "consensus_digest": CONSENSUS_DIGEST,
             "eval_code_digest": eval_code_digest(),
+            "eval_runtime_enforced": enforce_runtime,
+            "eval_runtime_compatible": runtime["compatible"],
+            "eval_runtime_digest": runtime["digest"],
+            "expected_eval_runtime_digest": runtime["expected_digest"],
+            "eval_runtime": runtime["identity"],
+            "eval_runtime_issues": runtime["issues"],
         }
 
     @app.post("/eval")
     def start_eval(req: EvalRequest):
+        if enforce_runtime:
+            from leoma.infra.chain_config import SPEC
+            from leoma.eval.runtime_lock import eval_runtime_report
+
+            runtime = eval_runtime_report(SPEC.runtime)
+            if not runtime["compatible"]:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "evaluator runtime does not match chain.toml [runtime]",
+                        "reason": "runtime_mismatch",
+                        "issues": runtime["issues"],
+                    },
+                )
         _reap(time.monotonic())
 
         if not lock.acquire(blocking=False):
@@ -567,6 +592,7 @@ def run_eval_job(req: EvalRequest, emit: Emit, should_cancel: ShouldCancel = lam
     from leoma.eval.dataset import build_duel_clips, corpus_audit, fetch_manifest
     from leoma.eval.determinism import apply_determinism, runtime_env
     from leoma.eval.digests import digest_obj
+    from leoma.eval.runtime_lock import eval_runtime_report
     from leoma.app.validator.seeds import eval_seed
 
     check_request(req)
@@ -676,6 +702,7 @@ def run_eval_job(req: EvalRequest, emit: Emit, should_cancel: ShouldCancel = lam
         "eval_code_digest": eval_code_digest(),
         "corpus": corpus_audit(manifest, entries),
         "env": runtime_env(),
+        "eval_runtime": eval_runtime_report(spec.runtime),
         # Not part of the consensus surface (see eval/devices.py) — recorded here so a
         # distance disagreement between validators can be checked against "did the two
         # duelists even run on the same kind of device" before assuming a real bug.
