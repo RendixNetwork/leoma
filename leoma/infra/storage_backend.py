@@ -125,7 +125,8 @@ def _build_minio_client(
     if not access_key or not secret_key:
         raise ValueError(
             f"Missing object storage credentials for {purpose}. "
-            "Set the matching access key and secret key (R2_OWN_*)."
+            "Set the matching access key and secret key (HIPPIUS_OWN_* for Hippius, "
+            "R2_OWN_* for R2)."
         )
     return Minio(
         normalize_s3_endpoint_host(endpoint_raw),

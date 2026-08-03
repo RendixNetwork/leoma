@@ -221,13 +221,42 @@ def check_eval_servers(
     )
 
 
-def check_state_bucket(own_bucket: Optional[str]) -> CheckResult:
+def check_state_bucket(
+    own_bucket: Optional[str], error: Optional[str] = None
+) -> CheckResult:
     if own_bucket and own_bucket.strip():
+        if error:
+            return CheckResult(
+                "state_bucket",
+                FAIL,
+                f"validator state bucket {own_bucket} is configured but not reachable "
+                f"with its write credentials ({error})",
+            )
         return CheckResult("state_bucket", PASS, f"king state persists to {own_bucket}")
     return CheckResult(
         "state_bucket", FAIL,
-        "R2_OWN_BUCKET is not set — the validator cannot persist king state and will refuse to run.",
+        "the validator state bucket is not set (HIPPIUS_OWN_BUCKET for Hippius, "
+        "R2_OWN_BUCKET for R2) — the validator cannot persist king state and will refuse to run.",
     )
+
+
+def expected_subnet_name(
+    network: str,
+    canonical_name: str,
+    testnet_override: Optional[str] = None,
+) -> str:
+    """Resolve the subnet identity preflight should require.
+
+    Test chains are often borrowed before a subnet receives its production identity.
+    An explicit override permits that dress rehearsal without weakening the mainnet
+    wrong-NetUID guard. Mainnet always remains pinned to ``chain.toml``.
+    """
+    override = (testnet_override or "").strip()
+    if not override:
+        return canonical_name
+    if network.strip().casefold() in {"finney", "mainnet"}:
+        raise ValueError("LEOMA_TESTNET_SUBNET_NAME cannot override a mainnet subnet identity")
+    return override
 
 
 def check_dashboard_bucket(
@@ -239,7 +268,7 @@ def check_dashboard_bucket(
 
     Dashboard publication is observability, not consensus, so a missing dedicated
     bucket is a warning rather than a launch-blocking failure. The validator retains
-    the legacy fallback to ``R2_OWN_BUCKET`` but preflight makes that fallback visible.
+    a same-state-bucket fallback but preflight makes that fallback visible.
     """
     dashboard = (dashboard_bucket or "").strip()
     state = (own_bucket or "").strip()
@@ -356,6 +385,7 @@ def run_preflight(
     wallet_probe: WalletProbe,
     chain_probe: ChainProbe,
     expected_subnet_name: str,
+    state_error: Optional[str] = None,
     dashboard_bucket: Optional[str] = None,
     dashboard_error: Optional[str] = None,
     corpus_fetched_digest: Optional[str] = None,
@@ -377,7 +407,7 @@ def run_preflight(
         *check_eval_servers(
             eval_servers, consensus_digest, eval_code_digest, eval_runtime_digest
         ),
-        check_state_bucket(own_bucket),
+        check_state_bucket(own_bucket, state_error),
         check_dashboard_bucket(dashboard_bucket, own_bucket, dashboard_error),
         check_wallet(wallet_probe),
         check_chain(chain_probe, expected_subnet_name),

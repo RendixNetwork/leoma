@@ -408,12 +408,38 @@ class Settings:
         # ── King-of-the-hill: this validator's own state bucket ──
         # SAMPLING_ROTATION_INTERVAL is retained only for the (unused) allowlist snapshot.
         self.sampling_rotation_interval = _read_int("SAMPLING_ROTATION_INTERVAL", 100)
-        # This validator's own R2 bucket (write creds) for durable king state.
-        self.r2_own_endpoint = _read_str("R2_OWN_ENDPOINT", self.r2_endpoint_raw)
-        self.r2_own_region = _read_str("R2_OWN_REGION", self.r2_region)
-        self.r2_own_bucket = _read_optional_str("R2_OWN_BUCKET")
-        self.r2_own_write_access_key = _read_optional_str("R2_OWN_WRITE_ACCESS_KEY")
-        self.r2_own_write_secret_key = _read_optional_str("R2_OWN_WRITE_SECRET_KEY")
+        # This validator's own private bucket (write creds) for durable king state.
+        # ``R2_OWN_*`` predates Hippius support and remains a compatibility fallback;
+        # a Hippius deployment should not have to describe its state bucket as R2.
+        if self.object_storage_backend == "hippius":
+            self.r2_own_endpoint = (
+                _read_optional_str("HIPPIUS_OWN_ENDPOINT")
+                or _read_optional_str("R2_OWN_ENDPOINT")
+                or self.hippius_endpoint
+            )
+            self.r2_own_region = (
+                _read_optional_str("HIPPIUS_OWN_REGION")
+                or _read_optional_str("R2_OWN_REGION")
+                or self.hippius_region
+            )
+            self.r2_own_bucket = (
+                _read_optional_str("HIPPIUS_OWN_BUCKET")
+                or _read_optional_str("R2_OWN_BUCKET")
+            )
+            self.r2_own_write_access_key = (
+                _read_optional_str("HIPPIUS_OWN_WRITE_ACCESS_KEY")
+                or _read_optional_str("R2_OWN_WRITE_ACCESS_KEY")
+            )
+            self.r2_own_write_secret_key = (
+                _read_optional_str("HIPPIUS_OWN_WRITE_SECRET_KEY")
+                or _read_optional_str("R2_OWN_WRITE_SECRET_KEY")
+            )
+        else:
+            self.r2_own_endpoint = _read_str("R2_OWN_ENDPOINT", self.r2_endpoint_raw)
+            self.r2_own_region = _read_str("R2_OWN_REGION", self.r2_region)
+            self.r2_own_bucket = _read_optional_str("R2_OWN_BUCKET")
+            self.r2_own_write_access_key = _read_optional_str("R2_OWN_WRITE_ACCESS_KEY")
+            self.r2_own_write_secret_key = _read_optional_str("R2_OWN_WRITE_SECRET_KEY")
         # Public dashboard delivery is intentionally separated from canonical king
         # state. Endpoint + write credentials default to this validator owner's state
         # credentials, while optional LEOMA_DASHBOARD_* overrides support providers
@@ -428,12 +454,47 @@ class Settings:
         self.dashboard_region = (
             _read_optional_str("LEOMA_DASHBOARD_REGION") or self.r2_own_region
         )
-        self.dashboard_write_access_key = _read_optional_str(
+        explicit_dashboard_access_key = _read_optional_str(
             "LEOMA_DASHBOARD_WRITE_ACCESS_KEY"
-        ) or self.r2_own_write_access_key
-        self.dashboard_write_secret_key = _read_optional_str(
+        )
+        explicit_dashboard_secret_key = _read_optional_str(
             "LEOMA_DASHBOARD_WRITE_SECRET_KEY"
-        ) or self.r2_own_write_secret_key
+        )
+        # Bucket-scoped Hippius credentials can safely serve both roles only when the
+        # operator explicitly chose the same bucket. State objects remain private;
+        # JsonBucketStore applies public-read solely to dashboard.json.
+        if self.r2_own_bucket and self.r2_own_bucket == self.dashboard_bucket:
+            # An explicitly selected Hippius bucket must not accidentally inherit
+            # stale legacy R2 credentials. If no canonical HIPPIUS_OWN key was set,
+            # the key scoped to this exact dashboard bucket is the authoritative one.
+            canonical_hippius_key = _read_optional_str("HIPPIUS_OWN_WRITE_ACCESS_KEY")
+            canonical_hippius_secret = _read_optional_str("HIPPIUS_OWN_WRITE_SECRET_KEY")
+            if self.object_storage_backend == "hippius" and _read_optional_str(
+                "HIPPIUS_OWN_BUCKET"
+            ):
+                self.r2_own_write_access_key = (
+                    canonical_hippius_key
+                    or explicit_dashboard_access_key
+                    or self.r2_own_write_access_key
+                )
+                self.r2_own_write_secret_key = (
+                    canonical_hippius_secret
+                    or explicit_dashboard_secret_key
+                    or self.r2_own_write_secret_key
+                )
+            else:
+                self.r2_own_write_access_key = (
+                    self.r2_own_write_access_key or explicit_dashboard_access_key
+                )
+                self.r2_own_write_secret_key = (
+                    self.r2_own_write_secret_key or explicit_dashboard_secret_key
+                )
+        self.dashboard_write_access_key = (
+            explicit_dashboard_access_key or self.r2_own_write_access_key
+        )
+        self.dashboard_write_secret_key = (
+            explicit_dashboard_secret_key or self.r2_own_write_secret_key
+        )
 
         self.openai_api_key = _read_optional_str("OPENAI_API_KEY")
         self.gemini_api_key = _read_optional_str("GEMINI_API_KEY")

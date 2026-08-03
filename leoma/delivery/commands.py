@@ -34,7 +34,8 @@ def serve():
     Scans on-chain miner reveals, duels each new challenger against the reigning
     king on the GPU eval server (deterministic, block-hash-seeded), crowns
     winners, and sets equal weights across the king chain (else burns UID 0).
-    Requires R2_OWN_BUCKET and a reachable EVAL_SERVER_URL.
+    Requires HIPPIUS_OWN_BUCKET (or legacy R2_OWN_BUCKET) and a reachable
+    EVAL_SERVER_URL.
     """
     from leoma.app.validator.main import main
     _run_async(main())
@@ -70,13 +71,20 @@ def rehearse(ticks: int, state_bucket: str, state_prefix: str):
     """
     import os
 
-    production_bucket = (os.environ.get("R2_OWN_BUCKET") or "").strip()
+    from leoma.bootstrap import settings
+
+    production_bucket = (
+        os.environ.get("HIPPIUS_OWN_BUCKET")
+        or os.environ.get("R2_OWN_BUCKET")
+        or settings.r2_own_bucket
+        or ""
+    ).strip()
     rehearsal_bucket = state_bucket.strip()
     if not rehearsal_bucket:
         raise click.ClickException("--state-bucket cannot be empty")
     if production_bucket and rehearsal_bucket == production_bucket:
         raise click.ClickException(
-            "rehearsal state bucket must differ from R2_OWN_BUCKET"
+            "rehearsal state bucket must differ from the configured validator state bucket"
         )
     rehearsal_prefix = state_prefix.strip("/")
     if not rehearsal_prefix.startswith("rehearsals/") or ".." in rehearsal_prefix.split("/"):
@@ -143,9 +151,10 @@ def preflight():
         FAIL,
         ChainProbe,
         WalletProbe,
+        expected_subnet_name,
         run_preflight,
     )
-    from leoma.bootstrap import HOTKEY_NAME, NETUID, NETWORK, WALLET_NAME
+    from leoma.bootstrap import HOTKEY_NAME, NETUID, NETWORK, WALLET_NAME, settings
     from leoma.eval.codehash import eval_code_digest
     from leoma.eval.runtime_lock import expected_eval_runtime_digest
     from leoma.infra.chain_config import CONSENSUS_DIGEST, NAME, SEED_DIGEST, SPEC
@@ -166,7 +175,17 @@ def preflight():
             corpus_error = str(e)
 
     dashboard_bucket = os.environ.get("LEOMA_DASHBOARD_BUCKET")
-    own_bucket = os.environ.get("R2_OWN_BUCKET")
+    own_bucket = settings.r2_own_bucket
+    state_error = None
+    if own_bucket:
+        try:
+            from leoma.infra.storage_backend import create_own_write_client
+
+            state_client = create_own_write_client()
+            if not state_client.bucket_exists(own_bucket):
+                state_error = "bucket does not exist"
+        except Exception as e:  # noqa: BLE001 — converted into a blocking check result
+            state_error = str(e)
     dashboard_error = None
     if dashboard_bucket and dashboard_bucket != own_bucket:
         try:
@@ -266,6 +285,13 @@ def preflight():
 
     chain_probe = asyncio.run(_probe_chain())
 
+    try:
+        required_subnet_name = expected_subnet_name(
+            NETWORK, NAME, os.environ.get("LEOMA_TESTNET_SUBNET_NAME")
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     report = run_preflight(
         seed_digest=SEED_DIGEST,
         corpus_pinned=SPEC.corpus.pinned,
@@ -274,11 +300,12 @@ def preflight():
         eval_code_digest=eval_code_digest(),
         eval_runtime_digest=expected_eval_runtime_digest(SPEC.runtime),
         own_bucket=own_bucket,
+        state_error=state_error,
         dashboard_bucket=dashboard_bucket,
         dashboard_error=dashboard_error,
         wallet_probe=wallet_probe,
         chain_probe=chain_probe,
-        expected_subnet_name=NAME,
+        expected_subnet_name=required_subnet_name,
         corpus_fetched_digest=corpus_fetched_digest,
         corpus_error=corpus_error,
         eval_servers=eval_probes,

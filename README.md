@@ -70,7 +70,9 @@ The validator scans reveals, dispatches duels to an eval server, crowns winners,
 
 - **Bittensor wallet** (coldkey + hotkey) registered as a validator on the subnet.
 - **A reachable eval server** (`EVAL_SERVER_URL`), typically an SSH tunnel to a GPU box.
-- **An own bucket** (`R2_OWN_BUCKET` + `R2_OWN_WRITE_*`) for durable king state.
+- **A private Hippius state bucket** (`HIPPIUS_OWN_BUCKET` +
+  `HIPPIUS_OWN_WRITE_*`) for durable king state. Legacy `R2_OWN_*` aliases remain
+  supported.
 - **A separate public-read dashboard bucket** (`LEOMA_DASHBOARD_BUCKET`) defaulting
   to the same owner endpoint/write credentials. Providers with bucket-scoped keys
   can use the optional `LEOMA_DASHBOARD_*` overrides. Expose only
@@ -81,7 +83,7 @@ The validator scans reveals, dispatches duels to an eval server, crowns winners,
 ```bash
 # Requires Python 3.12+
 pip install -e .            # or: uv pip install -e .
-cp env.validator.example .env   # fill in wallet, EVAL_SERVER_URL, R2_OWN_*
+cp env.validator.example .env   # fill in wallet, EVAL_SERVER_URL, HIPPIUS_OWN_*
 leoma serve                 # scan reveals -> duel -> crown -> set weights
 ```
 
@@ -120,7 +122,8 @@ For a live-chain rehearsal on a non-production validator host, run
 rehearsals/<run-id>`. It exercises
 the real reveal, evaluator, verdict, persistence, and dashboard paths while the
 central weight boundary suppresses every `set_weights` extrinsic. The rehearsal
-bucket must differ from `R2_OWN_BUCKET`, and the process exits after `N` ticks.
+bucket must differ from the configured validator state bucket, and the process exits
+after `N` ticks.
 
 Before a new eval box is allowed to duel, prove it decodes the pinned corpus byte-identically:
 

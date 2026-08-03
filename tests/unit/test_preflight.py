@@ -6,6 +6,8 @@ Preflight is the one place that says WHY before an operator flips the switch. Th
 tests pin the classification of each check and the overall ready/not-ready verdict.
 """
 
+import pytest
+
 from leoma.app.preflight import (
     FAIL,
     PASS,
@@ -19,6 +21,7 @@ from leoma.app.preflight import (
     check_eval_servers,
     check_seed,
     check_wallet,
+    expected_subnet_name,
     run_preflight,
 )
 
@@ -87,6 +90,13 @@ class TestOverallVerdict:
         r = _run(own_bucket=None)
         assert not r.ready
 
+    def test_an_unreachable_state_bucket_blocks_launch(self):
+        r = _run(state_error="AccessDenied")
+        check = next(c for c in r.checks if c.name == "state_bucket")
+        assert check.status == FAIL
+        assert "AccessDenied" in check.detail
+        assert not r.ready
+
     def test_a_separate_dashboard_bucket_passes(self):
         r = _run()
         check = next(c for c in r.checks if c.name == "dashboard_bucket")
@@ -120,6 +130,18 @@ class TestOverallVerdict:
         assert not r.ready
         assert {failure.name for failure in r.failures} >= {"eval_server", "corpus_fetch"}
 
+
+class TestSubnetNameOverride:
+    def test_non_mainnet_can_explicitly_name_a_borrowed_test_subnet(self):
+        assert expected_subnet_name("test", "leoma", "fish") == "fish"
+
+    def test_no_override_keeps_the_chain_toml_identity(self):
+        assert expected_subnet_name("test", "leoma", "") == "leoma"
+
+    @pytest.mark.parametrize("network", ["finney", "mainnet", "FINNEY"])
+    def test_mainnet_identity_can_never_be_overridden(self, network):
+        with pytest.raises(ValueError, match="cannot override"):
+            expected_subnet_name(network, "leoma", "fish")
 
 class TestCorpusReachable:
     def test_matching_digest_passes(self):

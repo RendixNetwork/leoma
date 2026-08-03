@@ -53,7 +53,8 @@ leoma calibrate analyze box-*.json
 
 ## 2. Preflight — the launch gate
 
-On the validator box, with `EVAL_SERVER_URL`, `R2_OWN_BUCKET`,
+On the validator box, with `EVAL_SERVER_URL`, `HIPPIUS_OWN_BUCKET` (or the legacy
+`R2_OWN_BUCKET` alias),
 `LEOMA_DASHBOARD_BUCKET`, `WALLET_NAME`, and `HOTKEY_NAME` set:
 
 ```bash

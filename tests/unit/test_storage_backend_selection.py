@@ -89,6 +89,67 @@ class TestDashboardBucketCredentials:
         assert rt.settings.dashboard_write_access_key == "owner-key"
         assert rt.settings.dashboard_write_secret_key == "owner-secret"
 
+
+class TestHippiusValidatorState:
+    def test_hippius_own_names_select_the_hippius_state_bucket(self, monkeypatch):
+        rt = _settings(
+            monkeypatch,
+            OBJECT_STORAGE_BACKEND="hippius",
+            HIPPIUS_ENDPOINT="s3.hippius.example",
+            HIPPIUS_REGION="decentralized",
+            HIPPIUS_OWN_BUCKET="leoma-state",
+            HIPPIUS_OWN_WRITE_ACCESS_KEY="state-key",
+            HIPPIUS_OWN_WRITE_SECRET_KEY="state-secret",
+        )
+
+        assert rt.settings.r2_own_bucket == "leoma-state"
+        assert rt.settings.r2_own_endpoint == "s3.hippius.example"
+        assert rt.settings.r2_own_region == "decentralized"
+        assert rt.settings.r2_own_write_access_key == "state-key"
+        assert rt.settings.r2_own_write_secret_key == "state-secret"
+
+    def test_same_hippius_bucket_can_reuse_its_bucket_scoped_dashboard_key(self, monkeypatch):
+        rt = _settings(
+            monkeypatch,
+            OBJECT_STORAGE_BACKEND="hippius",
+            HIPPIUS_OWN_BUCKET="leoma-dashboard",
+            LEOMA_DASHBOARD_BUCKET="leoma-dashboard",
+            LEOMA_DASHBOARD_WRITE_ACCESS_KEY="bucket-key",
+            LEOMA_DASHBOARD_WRITE_SECRET_KEY="bucket-secret",
+        )
+
+        assert rt.settings.r2_own_write_access_key == "bucket-key"
+        assert rt.settings.r2_own_write_secret_key == "bucket-secret"
+
+    def test_canonical_hippius_bucket_does_not_inherit_stale_legacy_r2_keys(self, monkeypatch):
+        rt = _settings(
+            monkeypatch,
+            OBJECT_STORAGE_BACKEND="hippius",
+            HIPPIUS_OWN_BUCKET="leoma-dashboard",
+            R2_OWN_WRITE_ACCESS_KEY="wrong-legacy-key",
+            R2_OWN_WRITE_SECRET_KEY="wrong-legacy-secret",
+            LEOMA_DASHBOARD_BUCKET="leoma-dashboard",
+            LEOMA_DASHBOARD_WRITE_ACCESS_KEY="bucket-key",
+            LEOMA_DASHBOARD_WRITE_SECRET_KEY="bucket-secret",
+        )
+
+        assert rt.settings.r2_own_write_access_key == "bucket-key"
+        assert rt.settings.r2_own_write_secret_key == "bucket-secret"
+
+    def test_legacy_r2_own_names_remain_a_hippius_fallback(self, monkeypatch):
+        rt = _settings(
+            monkeypatch,
+            OBJECT_STORAGE_BACKEND="hippius",
+            R2_OWN_BUCKET="legacy-state",
+            R2_OWN_ENDPOINT="legacy.hippius.example",
+            R2_OWN_WRITE_ACCESS_KEY="legacy-key",
+            R2_OWN_WRITE_SECRET_KEY="legacy-secret",
+        )
+
+        assert rt.settings.r2_own_bucket == "legacy-state"
+        assert rt.settings.r2_own_endpoint == "legacy.hippius.example"
+        assert rt.settings.r2_own_write_access_key == "legacy-key"
+
     def test_dashboard_can_use_bucket_scoped_credentials(self, monkeypatch):
         rt = _settings(
             monkeypatch,

@@ -1250,13 +1250,13 @@ async def _run_validator(
 
     own_bucket = (state_bucket or R2_OWN_BUCKET or "").strip()
     if not own_bucket:
-        log("R2_OWN_BUCKET not set; validator disabled (cannot persist king state)", "error")
+        log("Validator state bucket not set; validator disabled (cannot persist king state)", "error")
         return
     if rehearsal:
         if not state_bucket:
             raise ValueError("rehearsal requires an explicit state_bucket")
         if R2_OWN_BUCKET and own_bucket == R2_OWN_BUCKET:
-            raise ValueError("rehearsal state bucket must differ from R2_OWN_BUCKET")
+            raise ValueError("rehearsal state bucket must differ from the validator state bucket")
         clean_prefix = (state_prefix or "").strip("/")
         if not clean_prefix.startswith("rehearsals/") or ".." in clean_prefix.split("/"):
             raise ValueError("rehearsal state_prefix must start with 'rehearsals/'")
@@ -1369,7 +1369,8 @@ async def _run_validator(
             log_exception("Validator tick error", e)
         ticks += 1
         if max_ticks is not None and ticks >= max_ticks:
-            log(f"Rehearsal completed after {ticks} validator tick(s)", "success")
+            mode = "Rehearsal" if rehearsal else "Bounded validator run"
+            log(f"{mode} completed after {ticks} validator tick(s)", "success")
             break
         await asyncio.sleep(CHALLENGE_POLL_INTERVAL)
 

@@ -119,7 +119,7 @@ class TestRehearsalSafety:
         )
 
         assert result.exit_code != 0
-        assert "must differ from R2_OWN_BUCKET" in result.output
+        assert "must differ from the configured validator state bucket" in result.output
 
     def test_requires_a_namespaced_rehearsal_prefix(self, runner):
         result = runner.invoke(

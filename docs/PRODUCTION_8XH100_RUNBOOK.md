@@ -211,20 +211,20 @@ HIPPIUS_REGION=decentralized
 HIPPIUS_SOURCE_BUCKET=leoma-source
 HIPPIUS_VIDEOS_READ_ACCESS_KEY=<read-access-key>
 HIPPIUS_VIDEOS_READ_SECRET_KEY=<read-secret-key>
-R2_OWN_BUCKET=<validator-state-bucket>
+HIPPIUS_OWN_BUCKET=<validator-state-bucket>
 LEOMA_DASHBOARD_BUCKET=<public-dashboard-bucket>
 # Optional when the dashboard bucket has its own S3 credentials:
 # LEOMA_DASHBOARD_ENDPOINT=<dashboard-bucket-s3-endpoint>
 # LEOMA_DASHBOARD_REGION=<dashboard-bucket-region>
 # LEOMA_DASHBOARD_WRITE_ACCESS_KEY=<dashboard-write-access-key>
 # LEOMA_DASHBOARD_WRITE_SECRET_KEY=<dashboard-write-secret-key>
-R2_OWN_ENDPOINT=<state-bucket-s3-endpoint>
-R2_OWN_REGION=<state-bucket-region>
-R2_OWN_WRITE_ACCESS_KEY=<state-write-access-key>
-R2_OWN_WRITE_SECRET_KEY=<state-write-secret-key>
+HIPPIUS_OWN_ENDPOINT=<state-bucket-s3-endpoint>
+HIPPIUS_OWN_REGION=<state-bucket-region>
+HIPPIUS_OWN_WRITE_ACCESS_KEY=<state-write-access-key>
+HIPPIUS_OWN_WRITE_SECRET_KEY=<state-write-secret-key>
 ```
 
-The `R2_OWN_*` names are legacy names for the validator's independent S3-compatible
+The `R2_OWN_*` names remain compatibility aliases for the validator's independent S3-compatible
 state bucket; its endpoint may be Hippius. Then gate startup:
 
 ```bash
