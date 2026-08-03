@@ -1,0 +1,74 @@
+# Leoma production evaluator fleet (run on the 8xH100 host).
+#
+# Four isolated processes each see exactly two physical GPUs. Inside a container the
+# assigned pair is remapped to cuda:0/cuda:1. Host ports bind loopback only and are
+# reached from the validator through the authenticated SSH tunnel in the runbook.
+x-eval-common: &eval-common
+  image: rendixnetwork/leoma@${LEOMA_EVAL_IMAGE_DIGEST:?set LEOMA_EVAL_IMAGE_DIGEST to sha256:<64hex>}
+  pull_policy: always
+  restart: unless-stopped
+  command: leoma servers eval-server
+  env_file:
+    - .env
+  environment: &eval-environment
+    PYTHONUNBUFFERED: "1"
+    EVAL_SERVER_HOST: "0.0.0.0"
+    EVAL_SERVER_PORT: "9000"
+    LEOMA_EVAL_TOKEN: ${LEOMA_EVAL_TOKEN:?set LEOMA_EVAL_TOKEN in .env}
+    HIPPIUS_HUB_TOKEN: ${HIPPIUS_HUB_TOKEN:-}
+    LEOMA_MODEL_CACHE_DIR: ${LEOMA_MODEL_CACHE_DIR:-/var/lib/leoma/models}
+    LEOMA_MAX_CACHED_SNAPSHOTS: ${LEOMA_MAX_CACHED_SNAPSHOTS:-8}
+    LEOMA_MIN_FREE_BYTES: ${LEOMA_MIN_FREE_BYTES:-322122547200}
+    OBJECT_STORAGE_BACKEND: ${OBJECT_STORAGE_BACKEND:-hippius}
+    HIPPIUS_ENDPOINT: ${HIPPIUS_ENDPOINT:-s3.hippius.com}
+    HIPPIUS_REGION: ${HIPPIUS_REGION:-decentralized}
+    HIPPIUS_SOURCE_BUCKET: ${HIPPIUS_SOURCE_BUCKET:-leoma-source}
+    HIPPIUS_VIDEOS_READ_ACCESS_KEY: ${HIPPIUS_VIDEOS_READ_ACCESS_KEY:-}
+    HIPPIUS_VIDEOS_READ_SECRET_KEY: ${HIPPIUS_VIDEOS_READ_SECRET_KEY:-}
+    LEOMA_CONCURRENT_GENERATION: "1"
+    LEOMA_KING_DEVICE: cuda:0
+    LEOMA_CHALLENGER_DEVICE: cuda:1
+  volumes:
+    - ${LEOMA_MODEL_CACHE_HOST_DIR:-/var/lib/leoma/models}:${LEOMA_MODEL_CACHE_DIR:-/var/lib/leoma/models}
+    - ${LEOMA_CALIBRATION_HOST_DIR:-./calibration}:/var/lib/leoma/calibration
+
+services:
+  leoma-eval-0:
+    <<: *eval-common
+    container_name: leoma-eval-0
+    ports:
+      - "127.0.0.1:9000:9000"
+    gpus:
+      - driver: nvidia
+        device_ids: ["0", "1"]
+        capabilities: [gpu]
+
+  leoma-eval-1:
+    <<: *eval-common
+    container_name: leoma-eval-1
+    ports:
+      - "127.0.0.1:9001:9000"
+    gpus:
+      - driver: nvidia
+        device_ids: ["2", "3"]
+        capabilities: [gpu]
+
+  leoma-eval-2:
+    <<: *eval-common
+    container_name: leoma-eval-2
+    ports:
+      - "127.0.0.1:9002:9000"
+    gpus:
+      - driver: nvidia
+        device_ids: ["4", "5"]
+        capabilities: [gpu]
+
+  leoma-eval-3:
+    <<: *eval-common
+    container_name: leoma-eval-3
+    ports:
+      - "127.0.0.1:9003:9000"
+    gpus:
+      - driver: nvidia
+        device_ids: ["6", "7"]
+        capabilities: [gpu]

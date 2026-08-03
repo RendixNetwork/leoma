@@ -23,6 +23,13 @@ def _settings(monkeypatch, **env):
     return rt
 
 
+class TestMainnetDefaults:
+    def test_default_netuid_is_leoma_mainnet(self, monkeypatch):
+        monkeypatch.delenv("NETUID", raising=False)
+        rt = _settings(monkeypatch)
+        assert rt.settings.netuid == 36
+
+
 class TestBackendSelection:
     def test_the_default_is_still_r2_so_nothing_changes_for_operators(self, monkeypatch):
         monkeypatch.delenv("OBJECT_STORAGE_BACKEND", raising=False)

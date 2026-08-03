@@ -53,6 +53,33 @@ def test_health_publishes_the_digests_a_validator_preflights_on():
     body = c.get("/health").json()
     assert body["consensus_digest"].startswith("sha256:")
     assert body["eval_code_digest"].startswith("sha256:")
+    assert body["eval_runtime_digest"].startswith("sha256:")
+    assert body["expected_eval_runtime_digest"].startswith("sha256:")
+    assert body["eval_runtime_enforced"] is False
+    assert isinstance(body["eval_runtime_issues"], list)
+
+
+def test_production_server_rejects_an_incompatible_runtime(monkeypatch):
+    from leoma.eval import runtime_lock
+
+    runtime_lock.eval_runtime_report.cache_clear()
+    monkeypatch.setattr(
+        runtime_lock,
+        "eval_runtime_report",
+        lambda spec: {
+            "compatible": False,
+            "digest": "sha256:" + "a" * 64,
+            "expected_digest": "sha256:" + "b" * 64,
+            "identity": {},
+            "issues": ["torch: expected '2.6.0', observed '9.9.9'"],
+        },
+    )
+    c = TestClient(create_app())
+    health = c.get("/health").json()
+    assert health["status"] == "runtime_mismatch"
+    response = c.post("/eval", json=REQ)
+    assert response.status_code == 503
+    assert response.json()["reason"] == "runtime_mismatch"
 
 
 def test_configured_token_protects_every_route(monkeypatch):

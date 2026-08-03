@@ -76,6 +76,7 @@ _LOCAL_SIGNS: tuple[tuple[str, str], ...] = (
     ("consensus_mismatch", "consensus_mismatch"),
     ("consensus_echo_mismatch", "consensus_echo_mismatch"),
     ("code_mismatch", "code_mismatch"),
+    ("runtime_mismatch", "runtime_mismatch"),
     ("does not match the manifest", "corpus_integrity"),
     ("decoded ground truth does not match", "corpus_integrity"),
     ("corpus manifest digest mismatch", "corpus_integrity"),

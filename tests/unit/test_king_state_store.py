@@ -47,6 +47,19 @@ class TestJsonBucketStore:
     async def test_missing_key_returns_none(self):
         assert await _store().get("absent.json") is None
 
+    async def test_key_prefix_isolates_rehearsal_objects(self):
+        client = FakeMinio()
+        store = JsonBucketStore(
+            client, BUCKET, backoff=0, key_prefix="rehearsals/release-123"
+        )
+
+        await store.put("state/state.json", {"ok": True})
+
+        assert await store.get("state/state.json") == {"ok": True}
+        assert client.put_calls == ["rehearsals/release-123/state/state.json"]
+        assert client.get_calls == ["rehearsals/release-123/state/state.json"]
+        assert (BUCKET, "state/state.json") not in client.blobs
+
     # ── the headline: a transport error is NOT a miss ──────────────────────
     async def test_transport_error_raises_not_none(self):
         """An outage must RAISE. Returning None here is what blanked the state."""

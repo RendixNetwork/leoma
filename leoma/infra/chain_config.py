@@ -28,6 +28,7 @@ from leoma.eval.spec import (
     CorpusSpec,
     DeterminismSpec,
     DuelSpec,
+    EvalRuntimeSpec,
     GenSpec,
 )
 
@@ -77,6 +78,7 @@ _corpus = _doc.get("corpus", {})
 _gen = _doc.get("gen", {})
 _duel = _doc.get("duel", {})
 _determinism = _doc.get("determinism", {})
+_runtime = _doc.get("runtime", {})
 
 _VALID_SEED_REPO_BACKENDS = {"hf", "hippius"}
 
@@ -145,11 +147,13 @@ def _build_spec() -> ConsensusSpec:
                 pipeline=ARCH_PIPELINE,
             ),
             determinism=DeterminismSpec(**_determinism),
+            runtime=EvalRuntimeSpec(**_runtime),
         )
     except Exception as e:  # pydantic ValidationError / TypeError
         raise RuntimeError(
             f"chain.toml does not define a valid consensus surface ({_TOML_PATH}):\n{e}\n\n"
-            "Every field of [corpus], [gen], [duel] and [determinism] is REQUIRED and has "
+            "Every field of [corpus], [gen], [duel], [determinism] and [runtime] is "
+            "REQUIRED and has "
             "no default. A field with a default is a field a validator can silently forget, "
             "and a forgotten field means two validators grade the same challenger "
             "differently."

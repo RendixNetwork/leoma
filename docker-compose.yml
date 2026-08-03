@@ -1,13 +1,16 @@
-# Leoma Subnet — king of the hill.
+# Leoma Subnet — local/dev builds only.
 #
 # Two roles: the validator (scans reveals, dispatches duels, sets weights) and
 # the eval server (GPU box that downloads + runs miner models). They are usually
-# on separate hosts; this compose is a convenience for co-locating them.
+# on separate hosts; this compose is a convenience for co-locating and rebuilding
+# them. Production MUST use docker-compose.validator.production.yml and
+# docker-compose.eval.8xh100.production.yml, which accept only image digests and
+# contain no build instructions.
 services:
   # Validator: scan reveals -> duel via eval server -> crown -> set weights.
   validator:
     build: .
-    image: rendixnetwork/leoma:latest
+    image: rendixnetwork/leoma:dev-validator
     container_name: leoma-validator
     restart: unless-stopped
     command: leoma serve
@@ -16,7 +19,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       NETWORK: ${NETWORK:-finney}
-      NETUID: ${NETUID:-99}
+      NETUID: ${NETUID:-36}
       WALLET_NAME: ${WALLET_NAME:-default}
       HOTKEY_NAME: ${HOTKEY_NAME:-default}
       EVAL_SERVER_URL: ${EVAL_SERVER_URL:-http://eval-server:9000}
@@ -48,7 +51,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.eval
-    image: rendixnetwork/leoma:latest-eval
+    image: rendixnetwork/leoma:dev-eval
     container_name: leoma-eval-server
     restart: unless-stopped
     command: leoma servers eval-server

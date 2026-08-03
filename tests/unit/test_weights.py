@@ -12,6 +12,7 @@ misreporting the persisted state.
 import pytest
 
 from leoma.app.validator import king as K
+from leoma.app.validator import main as validator_main
 from leoma.app.validator.main import (
     _is_rate_limited,
     _unpack_set_weights,
@@ -104,6 +105,63 @@ class TestUnpack:
 
 
 class TestMaybeSetWeights:
+    async def test_rehearsal_suppresses_even_forced_extrinsic(self):
+        sub, st, store = _FakeSubtensor((True, "ok")), _state_with_king(), _store()
+        token = validator_main._WEIGHT_WRITES_ALLOWED.set(False)
+        try:
+            ok = await maybe_set_weights(
+                sub, _Wallet(), st, {"5A": 7}, store, force=True
+            )
+        finally:
+            validator_main._WEIGHT_WRITES_ALLOWED.reset(token)
+
+        assert ok is False
+        assert sub.calls == []
+        assert st.last_weight_block == 0
+        assert st.weight_failures == 0
+
+    async def test_rehearsal_context_is_restored_after_bad_bounds(self):
+        with pytest.raises(ValueError, match="max_ticks"):
+            await validator_main.main(
+                rehearsal=True, max_ticks=None, state_bucket="rehearsal-state"
+            )
+
+        assert validator_main._WEIGHT_WRITES_ALLOWED.get() is True
+
+    async def test_tick_persists_dirty_state_when_weight_write_is_a_noop(self, monkeypatch):
+        state, store = KingState(), _store()
+
+        class Subtensor:
+            async def get_current_block(self):
+                return 5000
+
+        async def empty_async(*args, **kwargs):
+            return []
+
+        async def no_weight(*args, **kwargs):
+            return False
+
+        async def no_publish(*args, **kwargs):
+            return None
+
+        def seed(state, block):
+            state.king = {"hotkey": "", "model_repo": "leoma/base", "model_digest": "sha256:a"}
+            state.touch()
+
+        monkeypatch.setattr(validator_main, "refresh_uid_map", empty_async)
+        monkeypatch.setattr(validator_main, "ensure_genesis_king", seed)
+        monkeypatch.setattr(validator_main, "_load_revealed_commitments", empty_async)
+        monkeypatch.setattr(validator_main, "scan_reveals", lambda *args, **kwargs: [])
+        monkeypatch.setattr(validator_main, "process_challengers", no_publish)
+        monkeypatch.setattr(validator_main, "maybe_set_weights", no_weight)
+        monkeypatch.setattr(validator_main, "_publish_dashboard", no_publish)
+        monkeypatch.setattr(validator_main, "_build_queue", lambda *args, **kwargs: [])
+
+        await validator_main.tick(Subtensor(), _Wallet(), state, store)
+
+        restored = await KingState.load(store)
+        assert restored.king["model_repo"] == "leoma/base"
+
     async def test_success_advances_last_weight_block(self):
         sub, st, store = _FakeSubtensor((True, "ok")), _state_with_king(), _store()
         ok = await maybe_set_weights(sub, _Wallet(), st, {"5A": 7}, store, force=True)

@@ -110,6 +110,7 @@ class JsonBucketStore:
         retries: int = 3,
         backoff: float = 0.5,
         public_read: bool = False,
+        key_prefix: str = "",
     ):
         self.client = client
         self.bucket = bucket
@@ -120,13 +121,19 @@ class JsonBucketStore:
         # ACL. An S3 overwrite resets that ACL, so it must be re-applied after every
         # dashboard.json PUT. Canonical state stores always leave this False.
         self.public_read = public_read
+        self.key_prefix = key_prefix.strip("/")
+
+    def _storage_key(self, key: str) -> str:
+        clean = key.lstrip("/")
+        return f"{self.key_prefix}/{clean}" if self.key_prefix else clean
 
     # ---- blocking core (called via to_thread) ----------------------------
     def get_sync(self, key: str) -> Optional[dict]:
+        storage_key = self._storage_key(key)
         last: Optional[BaseException] = None
         for attempt in range(self.retries):
             try:
-                resp = self.client.get_object(self.bucket, key)
+                resp = self.client.get_object(self.bucket, storage_key)
             except Exception as e:
                 if _is_missing(e):
                     return None
@@ -134,7 +141,7 @@ class JsonBucketStore:
                 if attempt < self.retries - 1:
                     time.sleep(self.backoff * (2**attempt))
                     continue
-                raise StoreUnavailable(f"get {key}: {e}") from e
+                raise StoreUnavailable(f"get {storage_key}: {e}") from e
 
             try:
                 data = resp.read()
@@ -146,17 +153,20 @@ class JsonBucketStore:
             except (ValueError, TypeError) as e:
                 # A corrupt object is NOT a miss. Surfacing it prevents the
                 # caller from treating it as "fresh bucket" and overwriting.
-                raise StoreCorrupt(f"{key} is not valid JSON: {e}") from e
+                raise StoreCorrupt(f"{storage_key} is not valid JSON: {e}") from e
 
-        raise StoreUnavailable(f"get {key}: {last}")  # pragma: no cover - defensive
+        raise StoreUnavailable(
+            f"get {storage_key}: {last}"
+        )  # pragma: no cover - defensive
 
     def put_sync(self, key: str, obj: Any) -> None:
+        storage_key = self._storage_key(key)
         payload = json.dumps(obj, default=str, sort_keys=True).encode("utf-8")
         for attempt in range(self.retries):
             try:
                 self.client.put_object(
                     self.bucket,
-                    key,
+                    storage_key,
                     io.BytesIO(payload),
                     length=len(payload),
                     content_type="application/json",
@@ -168,7 +178,7 @@ class JsonBucketStore:
                     self.client._execute(
                         "PUT",
                         self.bucket,
-                        key,
+                        storage_key,
                         headers={"x-amz-acl": "public-read"},
                         query_params={"acl": ""},
                     )
@@ -177,7 +187,7 @@ class JsonBucketStore:
                 if attempt < self.retries - 1:
                     time.sleep(self.backoff * (2**attempt))
                     continue
-                raise StoreUnavailable(f"put {key}: {e}") from e
+                raise StoreUnavailable(f"put {storage_key}: {e}") from e
 
     # ---- async wrappers (Minio blocks; the validator loop must not) -------
     async def get(self, key: str) -> Optional[dict]:

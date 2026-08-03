@@ -24,6 +24,7 @@ module.exports = {
         HIPPIUS_HUB_USERNAME: process.env.HIPPIUS_HUB_USERNAME || "",
         HIPPIUS_HUB_PASSWORD: process.env.HIPPIUS_HUB_PASSWORD || "",
         LEOMA_MODEL_CACHE_DIR: process.env.LEOMA_MODEL_CACHE_DIR || "/var/lib/leoma/models",
+        LEOMA_UV_LOCK_PATH: process.env.LEOMA_UV_LOCK_PATH || `${__dirname}/uv.lock`,
 
         // Hippius S3 source-video corpus (ground-truth continuations).
         OBJECT_STORAGE_BACKEND: "hippius",

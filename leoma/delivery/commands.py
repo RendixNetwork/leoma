@@ -40,6 +40,60 @@ def serve():
     _run_async(main())
 
 
+@cli.command()
+@click.option(
+    "--ticks",
+    type=click.IntRange(min=1, max=10_000),
+    default=1,
+    show_default=True,
+    help="Number of live validator ticks before exiting.",
+)
+@click.option(
+    "--state-bucket",
+    envvar="LEOMA_REHEARSAL_BUCKET",
+    required=True,
+    help="Dedicated non-production bucket for rehearsal state and dashboard output.",
+)
+@click.option(
+    "--state-prefix",
+    envvar="LEOMA_REHEARSAL_PREFIX",
+    required=True,
+    help="Isolated object prefix beginning with rehearsals/ (for example rehearsals/abc123).",
+)
+def rehearse(ticks: int, state_bucket: str, state_prefix: str):
+    """Run bounded live-chain validation without submitting weight extrinsics.
+
+    The complete reveal/evaluator/verdict/state path runs against live services, but
+    every set_weights call is suppressed at the final chain boundary. The dedicated
+    state bucket prevents a rehearsal from mutating production king or dashboard
+    state. The process exits after TICKS and is never installed as a service.
+    """
+    import os
+
+    production_bucket = (os.environ.get("R2_OWN_BUCKET") or "").strip()
+    rehearsal_bucket = state_bucket.strip()
+    if not rehearsal_bucket:
+        raise click.ClickException("--state-bucket cannot be empty")
+    if production_bucket and rehearsal_bucket == production_bucket:
+        raise click.ClickException(
+            "rehearsal state bucket must differ from R2_OWN_BUCKET"
+        )
+    rehearsal_prefix = state_prefix.strip("/")
+    if not rehearsal_prefix.startswith("rehearsals/") or ".." in rehearsal_prefix.split("/"):
+        raise click.ClickException("--state-prefix must start with rehearsals/")
+
+    from leoma.app.validator.main import main
+
+    _run_async(
+        main(
+            rehearsal=True,
+            max_ticks=ticks,
+            state_bucket=rehearsal_bucket,
+            state_prefix=rehearsal_prefix,
+        )
+    )
+
+
 @cli.group()
 def servers():
     """Start individual services.
@@ -76,16 +130,25 @@ def preflight():
     """Check whether this validator is ready to launch — a hard gate, not a hope.
 
     Verifies every pin the subnet needs before it will crown anyone: the genesis
-    king, the corpus manifest, the consensus surface, and (if configured) that the
-    eval box is on the same chain.toml + scoring code. Exits non-zero if anything is
-    a hard FAIL, so it can gate a launch script.
+    king, corpus, live wallet/subnet registration, and every evaluator's consensus,
+    scoring code, and numerical runtime. Exits non-zero if anything is a hard FAIL,
+    so it can gate a launch script.
     """
     import os
 
     from leoma.bootstrap import emit_log as log, emit_header as log_header
-    from leoma.app.preflight import PASS, WARN, FAIL, run_preflight
+    from leoma.app.preflight import (
+        PASS,
+        WARN,
+        FAIL,
+        ChainProbe,
+        WalletProbe,
+        run_preflight,
+    )
+    from leoma.bootstrap import HOTKEY_NAME, NETUID, NETWORK, WALLET_NAME
     from leoma.eval.codehash import eval_code_digest
-    from leoma.infra.chain_config import CONSENSUS_DIGEST, SEED_DIGEST, SPEC
+    from leoma.eval.runtime_lock import expected_eval_runtime_digest
+    from leoma.infra.chain_config import CONSENSUS_DIGEST, NAME, SEED_DIGEST, SPEC
 
     log_header("Leoma Preflight")
 
@@ -99,7 +162,7 @@ def preflight():
 
             manifest = fetch_manifest(create_source_read_client(), SPEC.corpus)
             corpus_fetched_digest = manifest.source_digest
-        except Exception as e:  # noqa: BLE001 — a fetch failure is a WARN, not a crash
+        except Exception as e:  # noqa: BLE001 — converted into a blocking check result
             corpus_error = str(e)
 
     dashboard_bucket = os.environ.get("LEOMA_DASHBOARD_BUCKET")
@@ -134,13 +197,74 @@ def preflight():
             try:
                 token = os.environ.get("LEOMA_EVAL_TOKEN", "")
                 headers = {"Authorization": f"Bearer {token}"} if token else {}
-                health = httpx.get(
+                response = httpx.get(
                     f"{url}/health", timeout=httpx.Timeout(15.0), headers=headers
-                ).json()
+                )
+                response.raise_for_status()
+                health = response.json()
                 probes.append(EvalServerProbe(url, health, None))
             except Exception as e:  # noqa: BLE001
                 probes.append(EvalServerProbe(url, None, str(e)))
         eval_probes = tuple(probes)
+
+    # Verify the effective wallet (including defaults), then prove its public hotkey
+    # is registered and permitted on the configured live subnet. Merely checking that
+    # WALLET_NAME/HOTKEY_NAME strings are non-empty allowed preflight to say Ready for
+    # a wallet that did not exist or could never set weights.
+    import bittensor as bt
+
+    wallet = bt.Wallet(name=WALLET_NAME, hotkey=HOTKEY_NAME)
+    hotkey_exists = False
+    hotkey_ss58 = None
+    wallet_error = None
+    try:
+        hotkey_exists = bool(wallet.hotkey_file.exists_on_device())
+        if hotkey_exists:
+            hotkey_ss58 = wallet.hotkey.ss58_address
+    except Exception as e:  # noqa: BLE001 — converted into a blocking check result
+        wallet_error = str(e)
+    wallet_probe = WalletProbe(
+        WALLET_NAME, HOTKEY_NAME, hotkey_exists, hotkey_ss58, wallet_error
+    )
+
+    async def _probe_chain() -> ChainProbe:
+        if not hotkey_ss58:
+            return ChainProbe(
+                NETWORK, NETUID, None, None, None, None, False,
+                "wallet hotkey address is unavailable",
+            )
+        try:
+            async with bt.AsyncSubtensor(network=NETWORK) as subtensor:
+                block = await subtensor.get_current_block()
+                subnet = await subtensor.subnet(NETUID, block=block)
+                raw_name = getattr(subnet, "subnet_name", None) if subnet else None
+                if isinstance(raw_name, bytes):
+                    subnet_name = raw_name.decode("utf-8", errors="strict")
+                elif raw_name is None:
+                    subnet_name = None
+                else:
+                    subnet_name = str(raw_name)
+
+                meta = await subtensor.metagraph(NETUID, block=block)
+                hotkeys = list(getattr(meta, "hotkeys", []) or [])
+                if hotkey_ss58 not in hotkeys:
+                    return ChainProbe(
+                        NETWORK, NETUID, subnet_name, block, hotkey_ss58, None, False
+                    )
+                index = hotkeys.index(hotkey_ss58)
+                uids = getattr(meta, "uids", None)
+                uid = int(uids[index]) if uids is not None else index
+                permits = getattr(meta, "validator_permit", None)
+                permit = bool(permits[index]) if permits is not None else False
+                return ChainProbe(
+                    NETWORK, NETUID, subnet_name, block, hotkey_ss58, uid, permit
+                )
+        except Exception as e:  # noqa: BLE001 — converted into a blocking check result
+            return ChainProbe(
+                NETWORK, NETUID, None, None, hotkey_ss58, None, False, str(e)
+            )
+
+    chain_probe = asyncio.run(_probe_chain())
 
     report = run_preflight(
         seed_digest=SEED_DIGEST,
@@ -148,11 +272,13 @@ def preflight():
         manifest_digest=SPEC.corpus.manifest_digest,
         consensus_digest=CONSENSUS_DIGEST,
         eval_code_digest=eval_code_digest(),
+        eval_runtime_digest=expected_eval_runtime_digest(SPEC.runtime),
         own_bucket=own_bucket,
         dashboard_bucket=dashboard_bucket,
         dashboard_error=dashboard_error,
-        wallet_name=os.environ.get("WALLET_NAME"),
-        hotkey_name=os.environ.get("HOTKEY_NAME"),
+        wallet_probe=wallet_probe,
+        chain_probe=chain_probe,
+        expected_subnet_name=NAME,
         corpus_fetched_digest=corpus_fetched_digest,
         corpus_error=corpus_error,
         eval_servers=eval_probes,

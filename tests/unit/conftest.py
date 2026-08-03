@@ -142,6 +142,10 @@ def make_verdict(spec, *, accepted: bool, **extra) -> dict:
     guard standing between the subnet and a verdict produced under someone else's
     parameters. So every fake verdict carries one.
     """
+    from leoma.eval.codehash import eval_code_digest
+    from leoma.eval.runtime_lock import expected_eval_runtime_digest
+
+    runtime_digest = expected_eval_runtime_digest(spec.runtime)
     return {
         "accepted": accepted,
         "verdict": "challenger" if accepted else "king",
@@ -149,7 +153,12 @@ def make_verdict(spec, *, accepted: bool, **extra) -> dict:
         "mu_hat": 0.02 if accepted else -0.02,
         "n_clips": spec.duel.n_clips,
         "echo": spec.model_dump(mode="json"),
-        "audit": {"consensus_digest": spec.digest(), "corpus": {"clip_keys_digest": "sha256:x"}},
+        "audit": {
+            "consensus_digest": spec.digest(),
+            "eval_code_digest": eval_code_digest(),
+            "eval_runtime": {"compatible": True, "digest": runtime_digest},
+            "corpus": {"clip_keys_digest": "sha256:x"},
+        },
         "verdict_digest": "sha256:v",
         "produced_at": "2026-07-13T00:00:00+00:00",
         **extra,

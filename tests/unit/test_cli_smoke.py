@@ -7,6 +7,7 @@ driving a testnet rehearsal. These tests pin that both failure modes, for both t
 and file-path sources, now exit cleanly with a readable message.
 """
 import json
+from importlib.metadata import version
 
 import httpx
 import pytest
@@ -18,6 +19,13 @@ from leoma.delivery.commands import cli
 @pytest.fixture
 def runner():
     return CliRunner()
+
+
+def test_cli_version_uses_installed_distribution_metadata(runner):
+    result = runner.invoke(cli, ["--version"])
+
+    assert result.exit_code == 0
+    assert version("leoma") in result.output
 
 
 def _good_dashboard():
@@ -96,3 +104,32 @@ class TestSmokeMissingSource:
         result = runner.invoke(cli, ["smoke"])
         assert result.exit_code != 0
         assert "dashboard.json URL or path" in result.output
+
+
+class TestRehearsalSafety:
+    def test_requires_a_separate_state_bucket(self, runner, monkeypatch):
+        monkeypatch.setenv("R2_OWN_BUCKET", "production-state")
+        result = runner.invoke(
+            cli,
+            [
+                "rehearse", "--ticks", "1",
+                "--state-bucket", "production-state",
+                "--state-prefix", "rehearsals/test",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "must differ from R2_OWN_BUCKET" in result.output
+
+    def test_requires_a_namespaced_rehearsal_prefix(self, runner):
+        result = runner.invoke(
+            cli,
+            [
+                "rehearse", "--ticks", "1",
+                "--state-bucket", "test-state",
+                "--state-prefix", "state",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "must start with rehearsals/" in result.output

@@ -359,7 +359,7 @@ class Settings:
     """Central settings loaded from the environment."""
 
     def __init__(self) -> None:
-        self.netuid = _read_int("NETUID", 99)
+        self.netuid = _read_int("NETUID", 36)
         self.epoch_len = _read_int("EPOCH_LEN", 180)
         self.request_timeout = _read_int("REQUEST_TIMEOUT", 300)
         self.wallet_name = _read_str("WALLET_NAME", "default")

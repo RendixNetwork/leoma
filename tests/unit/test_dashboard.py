@@ -69,11 +69,12 @@ class TestBuildDashboard:
         st = _two_king_state()
         d = build_dashboard(
             st, {"A": 10, "B": 20},
-            chain_meta={"name": "leoma", "netuid": 99},
+            chain_meta={"name": "leoma", "netuid": 36},
             duel_params={"metric": "lpips", "delta_threshold": 0.0025},
             updated_at="2026-01-01T00:00:00Z",
         )
         assert d["chain"]["name"] == "leoma"
+        assert d["chain"]["netuid"] == 36
         assert d["duel_params"]["metric"] == "lpips"
         assert d["updated_at"] == "2026-01-01T00:00:00Z"
         # `transient_errors` is tracked separately from `failed` so that retries

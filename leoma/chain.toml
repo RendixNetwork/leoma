@@ -131,6 +131,16 @@ early_stop_factor = 20.0
 # the number can be measured rather than invented.
 freeze_margin_fraction = 0.0
 
+[runtime]
+# A source-code digest alone cannot prove two boxes execute the same diffusion
+# graph. This pins the Python/CUDA/H100 axes plus the exact uv dependency resolution.
+# Any uv.lock change is a coordinated consensus release: update this digest, rebuild
+# immutable images, deploy every validator/evaluator, and recalibrate before dueling.
+python = "3.12"
+cuda = "12.4"
+compute_capability = "9.0"
+eval_lock_digest = "sha256:c6b16699b506f8386409b001ff26b4ba48ba1eeab4ed89481b53f79637c94cc3"
+
 [determinism]
 torch_deterministic = true
 cudnn_benchmark = false

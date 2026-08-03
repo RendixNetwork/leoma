@@ -6,7 +6,7 @@
 #
 # It needs the [eval] extra (torch / diffusers / lpips / opencv / open_clip).
 # The validator image (Dockerfile) deliberately does NOT.
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04@sha256:2fcc4280646484290cc50dce5e65f388dd04352b07cbe89a635703bd1f9aedb6
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -22,13 +22,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 RUN python3.12 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:${PATH}"
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}"
 
 WORKDIR /app
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir uv==0.11.6
 
 COPY pyproject.toml uv.lock README.md ./
 COPY leoma ./leoma
+ENV LEOMA_UV_LOCK_PATH=/app/uv.lock
 
 # The [eval] extra is the whole point of this image. Frozen sync makes rebuilds use
 # the exact tested CUDA/Diffusers/Transformers graph from uv.lock; an open-ended GPU

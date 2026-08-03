@@ -39,6 +39,7 @@ const shared = {
   LEOMA_MODEL_CACHE_DIR: process.env.LEOMA_MODEL_CACHE_DIR || "/var/lib/leoma/models",
   LEOMA_MAX_CACHED_SNAPSHOTS: process.env.LEOMA_MAX_CACHED_SNAPSHOTS || "8",
   LEOMA_MIN_FREE_BYTES: process.env.LEOMA_MIN_FREE_BYTES || "322122547200",
+  LEOMA_UV_LOCK_PATH: process.env.LEOMA_UV_LOCK_PATH || `${__dirname}/uv.lock`,
   LEOMA_CONCURRENT_GENERATION: "1",
   LEOMA_KING_DEVICE: "cuda:0",
   LEOMA_CHALLENGER_DEVICE: "cuda:1",
